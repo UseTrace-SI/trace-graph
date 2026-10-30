@@ -6,56 +6,52 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
-
-	"database/sql"
 )
 
 var langExts = map[string]string{
-	".go":    "go",
-	".py":    "python",
-	".js":    "javascript",
-	".ts":    "typescript",
-	".tsx":   "typescript",
-	".rs":    "rust",
-	".java":  "java",
-	".c":     "c",
-	".cpp":   "cpp",
-	".cc":    "cpp",
-	".rb":    "ruby",
-	".cs":    "csharp",
-	".kt":    "kotlin",
-	".swift": "swift",
-	".scala": "scala",
-	".dart":  "dart",
-	".php":   "php",
-	".lua":   "lua",
-	".r":     "r",
-	".sql":   "sql",
-	".sh":    "bash",
-	".bash":  "bash",
-	".zsh":   "zsh",
-	".hs":    "haskell",
-	".ex":    "elixir",
-	".exs":   "elixir",
-	".erl":   "erlang",
-	".clj":   "clojure",
-	".cljs":  "clojurescript",
-	".cue":   "cue",
+	".go":     "go",
+	".py":     "python",
+	".js":     "javascript",
+	".ts":     "typescript",
+	".tsx":    "typescript",
+	".rs":     "rust",
+	".java":   "java",
+	".c":      "c",
+	".cpp":    "cpp",
+	".cc":     "cpp",
+	".rb":     "ruby",
+	".cs":     "csharp",
+	".kt":     "kotlin",
+	".swift":  "swift",
+	".scala":  "scala",
+	".dart":   "dart",
+	".php":    "php",
+	".lua":    "lua",
+	".r":      "r",
+	".sql":    "sql",
+	".sh":     "bash",
+	".bash":   "bash",
+	".zsh":    "zsh",
+	".hs":     "haskell",
+	".ex":     "elixir",
+	".exs":    "elixir",
+	".erl":    "erlang",
+	".clj":    "clojure",
+	".cljs":   "clojurescript",
+	".cue":    "cue",
 	".groovy": "groovy",
-	".hcl":   "hcl",
-	".tf":    "hcl",
-	".jl":    "julia",
-	".ml":    "ocaml",
-	".m":     "objectivec",
-	".pl":    "perl",
-	".proto": "protobuf",
-	".yaml":  "yaml",
-	".yml":   "yaml",
-	".zig":   "zig",
+	".hcl":    "hcl",
+	".tf":     "hcl",
+	".jl":     "julia",
+	".ml":     "ocaml",
+	".m":      "objectivec",
+	".pl":     "perl",
+	".proto":  "protobuf",
+	".yaml":   "yaml",
+	".yml":    "yaml",
+	".zig":    "zig",
 }
 
 var symbolPatterns = []*regexp.Regexp{
@@ -72,43 +68,13 @@ var symbolPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\s*defn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 }
 
-func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
-	n := 0
-	err := filepath.Walk(repo, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(path))
-		lang, ok := langExts[ext]
-		if !ok {
-			return nil
-		}
-		rel, _ := filepath.Rel(repo, path)
-		// cache check
-		var cachedMtime int64
-		db.QueryRow("SELECT mtime FROM file_cache WHERE path=?", rel).Scan(&cachedMtime)
-		if cachedMtime == info.ModTime().Unix() {
-			return nil
-		}
-		if lang == "go" {
-			c, e := analyzeGo(repo, rel, path, db)
-			n += c
-			db.Exec("INSERT OR REPLACE INTO file_cache(path,mtime,size) VALUES(?,?,?)", rel, info.ModTime().Unix(), info.Size())
-			return e
-		}
-		c, e := analyzeRegex(repo, rel, path, db)
-		n += c
-		db.Exec("INSERT OR REPLACE INTO file_cache(path,mtime,size) VALUES(?,?,?)", rel, info.ModTime().Unix(), info.Size())
-		return e
-	})
-	return n, err
-}
+const analyzerVersion = "inventory-v2"
 
-func analyzeGo(repo, rel, path string, db *sql.DB) (int, error) {
-	// use go/ast
-	src, err := os.ReadFile(path)
-	if err != nil {
-		return 0, nil
+func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
+
+func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, error) {
+	if langExts[strings.ToLower(filepathExt(rel))] != "go" {
+		return analyzeRegexFile(repo, rel, string(src), db)
 	}
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, src, parser.ParseComments)
@@ -167,15 +133,7 @@ func analyzeGo(repo, rel, path string, db *sql.DB) (int, error) {
 	return n, nil
 }
 
-func analyzeRegex(repo, rel, path string, db *sql.DB) (int, error) {
-	src, err := os.ReadFile(path)
-	if err != nil {
-		return 0, nil
-	}
-	return analyzeRegexFile(repo, rel, string(src), db)
-}
-
-func analyzeRegexFile(repo, rel, src string, db *sql.DB) (int, error) {
+func analyzeRegexFile(repo, rel, src string, db *indexWriter) (int, error) {
 	lines := strings.Split(src, "\n")
 	n := 0
 	for i, line := range lines {

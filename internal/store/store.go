@@ -35,6 +35,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS symbol_fts USING fts5(name, signature, conten
 CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
   INSERT INTO symbol_fts(rowid,name,signature) VALUES(new.rowid,new.name,new.signature);
 END;
+CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+  INSERT INTO symbol_fts(symbol_fts,rowid,name,signature) VALUES('delete',old.rowid,old.name,old.signature);
+END;
+CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
+  INSERT INTO symbol_fts(symbol_fts,rowid,name,signature) VALUES('delete',old.rowid,old.name,old.signature);
+  INSERT INTO symbol_fts(rowid,name,signature) VALUES(new.rowid,new.name,new.signature);
+END;
+CREATE TABLE IF NOT EXISTS file_cache_v2 (repo TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(repo,path));
 CREATE TABLE IF NOT EXISTS relations (id TEXT PRIMARY KEY, repo TEXT NOT NULL, from_symbol TEXT NOT NULL,
   to_symbol TEXT NOT NULL, kind TEXT NOT NULL, file TEXT NOT NULL, line INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS relations_from ON relations(from_symbol);
@@ -43,6 +51,22 @@ CREATE INDEX IF NOT EXISTS relations_to ON relations(to_symbol);
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)
 	}
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version < 1 {
+		// The old derived index had unscoped IDs and potentially stale FTS
+		// entries. Rebuild it once rather than carrying corruption forward.
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		if _, err := tx.Exec("INSERT INTO symbol_fts(symbol_fts) VALUES('rebuild'); DELETE FROM symbols; DELETE FROM relations; DELETE FROM file_cache; DELETE FROM file_cache_v2; PRAGMA user_version=1"); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	return nil
 }
-

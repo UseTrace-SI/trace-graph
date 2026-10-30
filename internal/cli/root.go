@@ -3,11 +3,11 @@ package cli
 import (
 	"bufio"
 	"database/sql"
-	"os/exec"
-	"strings"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/UseTrace-SI/trace-graph/internal/graph"
 	"github.com/UseTrace-SI/trace-graph/internal/store"
@@ -17,7 +17,7 @@ import (
 var dbPath string
 var repoPath string
 
-func Execute() error {
+func newRoot() *cobra.Command {
 	root := &cobra.Command{Use: "trace-graph", Short: "Code map for Trace"}
 	root.PersistentFlags().StringVar(&dbPath, "db", ".trace-graph/graph.db", "graph database path")
 	root.PersistentFlags().StringVar(&repoPath, "repo", ".", "repository root")
@@ -30,8 +30,10 @@ func Execute() error {
 	root.AddCommand(defCmd())
 	root.AddCommand(cochangeCmd())
 	root.AddCommand(capabilitiesCmd())
-	return root.Execute()
+	return root
 }
+
+func Execute() error { return newRoot().Execute() }
 
 func openDB() (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
@@ -42,7 +44,7 @@ func openDB() (*sql.DB, error) {
 
 func versionCmd() *cobra.Command {
 	return &cobra.Command{Use: "version", Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("trace-graph dev")
+		fmt.Fprintln(cmd.OutOrStdout(), "trace-graph dev")
 	}}
 }
 
@@ -57,7 +59,7 @@ func analyzeCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("analyzed %d symbols\n", n)
+		fmt.Fprintf(cmd.OutOrStdout(), "analyzed %d symbols\n", n)
 		return nil
 	}}
 }
@@ -80,7 +82,7 @@ func symbolsCmd() *cobra.Command {
 			if err := rows.Scan(&file, &name, &kind, &line); err != nil {
 				return err
 			}
-			fmt.Printf("%s:%d  %s  %s\n", file, line, kind, name)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  %s  %s\n", file, line, kind, name)
 		}
 		return rows.Err()
 	}}
@@ -105,7 +107,7 @@ func queryCmd() *cobra.Command {
 			if err := rows.Scan(&file, &name, &kind, &line); err != nil {
 				return err
 			}
-			fmt.Printf("%s:%d  %s  %s\n", file, line, kind, name)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  %s  %s\n", file, line, kind, name)
 		}
 		return rows.Err()
 	}}
@@ -123,12 +125,19 @@ func neighborsCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Println("definitions:")
+		fmt.Fprintln(cmd.OutOrStdout(), "definitions:")
 		for rows.Next() {
 			var file, kind string
 			var line int
-			rows.Scan(&file, &kind, &line)
-			fmt.Printf("  %s:%d  %s\n", file, line, kind)
+			if err := rows.Scan(&file, &line, &kind); err != nil {
+				rows.Close()
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s:%d  %s\n", file, line, kind)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
 		}
 		rows.Close()
 		r2, err := db.Query("SELECT DISTINCT from_symbol,file,line FROM relations WHERE to_symbol=? ORDER BY file,line", name)
@@ -136,14 +145,16 @@ func neighborsCmd() *cobra.Command {
 			return err
 		}
 		defer r2.Close()
-		fmt.Println("callers (neighbors):")
+		fmt.Fprintln(cmd.OutOrStdout(), "callers (neighbors):")
 		for r2.Next() {
 			var sym, file string
 			var line int
-			r2.Scan(&sym, &file, &line)
-			fmt.Printf("  %s  %s:%d\n", sym, file, line)
+			if err := r2.Scan(&sym, &file, &line); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s  %s:%d\n", sym, file, line)
 		}
-		return nil
+		return r2.Err()
 	}}
 }
 
@@ -160,11 +171,11 @@ func impactCmd() *cobra.Command {
 			return err
 		}
 		defer rows.Close()
-		fmt.Printf("files potentially affected by %s:\n", name)
+		fmt.Fprintf(cmd.OutOrStdout(), "files potentially affected by %s:\n", name)
 		for rows.Next() {
 			var f string
 			rows.Scan(&f)
-			fmt.Printf("  %s\n", f)
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", f)
 		}
 		return nil
 	}}
@@ -186,23 +197,21 @@ func defCmd() *cobra.Command {
 			var file, kind, sig string
 			var line int
 			rows.Scan(&file, &line, &kind, &sig)
-			fmt.Printf("%s:%d  [%s] %s\n", file, line, kind, sig)
+			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  [%s] %s\n", file, line, kind, sig)
 		}
 		return nil
 	}}
 }
 
-
 func capabilitiesCmd() *cobra.Command {
 	return &cobra.Command{Use: "capabilities", Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("semantic (treesitter build): go, python, javascript, typescript, rust, java, c, cpp, ruby")
-		fmt.Println("inventory (default build): python, javascript, typescript, rust, java, c, cpp, ruby, and others")
-		fmt.Println("relationships: calls (go, python, javascript, typescript, rust, java, c, cpp, ruby)")
-		fmt.Println("co-change: git history based")
-		fmt.Println("cache: mtime-based file_cache")
+		fmt.Fprintln(cmd.OutOrStdout(), "semantic (treesitter build): go, python, javascript, typescript, rust, java, c, cpp, ruby")
+		fmt.Fprintln(cmd.OutOrStdout(), "inventory (default build): python, javascript, typescript, rust, java, c, cpp, ruby, and others")
+		fmt.Fprintln(cmd.OutOrStdout(), "relationships: calls (go, python, javascript, typescript, rust, java, c, cpp, ruby)")
+		fmt.Fprintln(cmd.OutOrStdout(), "co-change: git history based")
+		fmt.Fprintln(cmd.OutOrStdout(), "cache: mtime-based file_cache")
 	}}
 }
-
 
 func cochangeCmd() *cobra.Command {
 	return &cobra.Command{Use: "cochange", RunE: func(cmd *cobra.Command, args []string) error {
@@ -222,7 +231,9 @@ func cochangeCmd() *cobra.Command {
 			for i := 0; i < len(current); i++ {
 				for j := i + 1; j < len(current); j++ {
 					a, b := current[i], current[j]
-					if a > b { a, b = b, a }
+					if a > b {
+						a, b = b, a
+					}
 					counts[pair{a, b}]++
 				}
 			}
@@ -261,10 +272,10 @@ func cochangeCmd() *cobra.Command {
 			if i >= 20 {
 				break
 			}
-			fmt.Printf("%d  %s  <->  %s\n", e.n, e.a, e.b)
+			fmt.Fprintf(cmd.OutOrStdout(), "%d  %s  <->  %s\n", e.n, e.a, e.b)
 		}
 		if len(entries) == 0 {
-			fmt.Println("no co-change data")
+			fmt.Fprintln(cmd.OutOrStdout(), "no co-change data")
 		}
 		return nil
 	}}
