@@ -21,6 +21,29 @@ func newRoot() *cobra.Command {
 	root := &cobra.Command{Use: "trace-graph", Short: "Code map for Trace"}
 	root.PersistentFlags().StringVar(&dbPath, "db", ".trace-graph/graph.db", "graph database path")
 	root.PersistentFlags().StringVar(&repoPath, "repo", ".", "repository root")
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		if cmd.Name() == "version" || cmd.Name() == "capabilities" {
+			return nil
+		}
+		var err error
+		repoPath, err = filepath.Abs(repoPath)
+		if err != nil {
+			return err
+		}
+		repoPath, err = filepath.EvalSymlinks(repoPath)
+		if err != nil {
+			return err
+		}
+		if !root.PersistentFlags().Changed("db") {
+			dbPath = filepath.Join(repoPath, ".trace-graph", "graph.db")
+			if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+				if _, err := os.Stat(filepath.Join(repoPath, ".trace", "trace.db")); err == nil {
+					dbPath = filepath.Join(repoPath, ".trace", "graph", "graph.db")
+				}
+			}
+		}
+		return nil
+	}
 	root.AddCommand(versionCmd())
 	root.AddCommand(analyzeCmd())
 	root.AddCommand(symbolsCmd())
@@ -30,6 +53,8 @@ func newRoot() *cobra.Command {
 	root.AddCommand(defCmd())
 	root.AddCommand(cochangeCmd())
 	root.AddCommand(capabilitiesCmd())
+	root.AddCommand(contextCmd())
+	root.AddCommand(refreshCmd())
 	return root
 }
 
@@ -71,7 +96,7 @@ func symbolsCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query("SELECT file,name,kind,line FROM symbols ORDER BY file,line")
+		rows, err := db.Query("SELECT file,name,kind,line FROM symbols WHERE repo=? ORDER BY file,line", repoPath)
 		if err != nil {
 			return err
 		}
@@ -96,7 +121,7 @@ func queryCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query("SELECT s.file,s.name,s.kind,s.line FROM symbols s JOIN symbol_fts f ON f.rowid=s.rowid WHERE symbol_fts MATCH ? ORDER BY s.file,s.line", q)
+		rows, err := db.Query("SELECT s.file,s.name,s.kind,s.line FROM symbols s JOIN symbol_fts f ON f.rowid=s.rowid WHERE symbol_fts MATCH ? AND s.repo=? ORDER BY s.file,s.line", q, repoPath)
 		if err != nil {
 			return err
 		}
@@ -121,7 +146,7 @@ func neighborsCmd() *cobra.Command {
 		}
 		defer db.Close()
 		name := args[0]
-		rows, err := db.Query("SELECT file,line,kind FROM symbols WHERE name=?", name)
+		rows, err := db.Query("SELECT file,line,kind FROM symbols WHERE name=? AND repo=?", name, repoPath)
 		if err != nil {
 			return err
 		}
@@ -140,7 +165,7 @@ func neighborsCmd() *cobra.Command {
 			return err
 		}
 		rows.Close()
-		r2, err := db.Query("SELECT DISTINCT from_symbol,file,line FROM relations WHERE to_symbol=? ORDER BY file,line", name)
+		r2, err := db.Query("SELECT DISTINCT from_symbol,file,line FROM relations WHERE to_symbol=? AND repo=? ORDER BY file,line", name, repoPath)
 		if err != nil {
 			return err
 		}
@@ -166,7 +191,7 @@ func impactCmd() *cobra.Command {
 		}
 		defer db.Close()
 		name := args[0]
-		rows, err := db.Query("SELECT DISTINCT file FROM relations WHERE to_symbol=? OR from_symbol=?", name, name)
+		rows, err := db.Query("SELECT DISTINCT file FROM relations WHERE repo=? AND (to_symbol=? OR from_symbol=?)", repoPath, name, name)
 		if err != nil {
 			return err
 		}
@@ -174,10 +199,12 @@ func impactCmd() *cobra.Command {
 		fmt.Fprintf(cmd.OutOrStdout(), "files potentially affected by %s:\n", name)
 		for rows.Next() {
 			var f string
-			rows.Scan(&f)
+			if err := rows.Scan(&f); err != nil {
+				return err
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", f)
 		}
-		return nil
+		return rows.Err()
 	}}
 }
 
@@ -188,7 +215,7 @@ func defCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query("SELECT file,line,kind,signature FROM symbols WHERE name=?", args[0])
+		rows, err := db.Query("SELECT file,line,kind,COALESCE(signature,'') FROM symbols WHERE name=? AND repo=?", args[0], repoPath)
 		if err != nil {
 			return err
 		}
@@ -196,10 +223,12 @@ func defCmd() *cobra.Command {
 		for rows.Next() {
 			var file, kind, sig string
 			var line int
-			rows.Scan(&file, &line, &kind, &sig)
+			if err := rows.Scan(&file, &line, &kind, &sig); err != nil {
+				return err
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  [%s] %s\n", file, line, kind, sig)
 		}
-		return nil
+		return rows.Err()
 	}}
 }
 
@@ -209,7 +238,7 @@ func capabilitiesCmd() *cobra.Command {
 		fmt.Fprintln(cmd.OutOrStdout(), "inventory (default build): python, javascript, typescript, rust, java, c, cpp, ruby, and others")
 		fmt.Fprintln(cmd.OutOrStdout(), "relationships: calls (go, python, javascript, typescript, rust, java, c, cpp, ruby)")
 		fmt.Fprintln(cmd.OutOrStdout(), "co-change: git history based")
-		fmt.Fprintln(cmd.OutOrStdout(), "cache: mtime-based file_cache")
+		fmt.Fprintln(cmd.OutOrStdout(), "cache: repository-scoped content hashes")
 	}}
 }
 

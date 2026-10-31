@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/UseTrace-SI/trace-graph/internal/embed"
 )
 
 // indexWriter preserves the first database error, including writes made from
@@ -62,18 +65,9 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 	w := &indexWriter{tx: tx}
 	seen := map[string]bool{}
 	n := 0
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = walkSources(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
-		}
-		if entry.IsDir() {
-			if path != root {
-				switch entry.Name() {
-				case ".git", ".trace", ".trace-graph", "node_modules", "vendor":
-					return filepath.SkipDir
-				}
-			}
-			return nil
 		}
 		if !entry.Type().IsRegular() || !supportedFile(strings.ToLower(filepath.Ext(path))) {
 			return nil
@@ -140,6 +134,33 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 		if err := removeFile(tx, root, path); err != nil {
 			return 0, err
 		}
+	}
+	symRows, err := tx.Query("SELECT id,name,COALESCE(signature,'') FROM symbols WHERE repo=?", root)
+	if err != nil {
+		return 0, err
+	}
+	type sym struct{ id, text string }
+	var syms []sym
+	for symRows.Next() {
+		var id, name, sig string
+		if err := symRows.Scan(&id, &name, &sig); err != nil {
+			symRows.Close()
+			return 0, err
+		}
+		syms = append(syms, sym{id: id, text: name + " " + sig})
+	}
+	symRows.Close()
+	if err := symRows.Err(); err != nil {
+		return 0, err
+	}
+	for _, s := range syms {
+		if _, err := tx.Exec("INSERT OR REPLACE INTO symbol_embeddings(symbol_id,dim,vector) VALUES(?,?,?)",
+			s.id, embed.Dim, embed.Encode(embed.Embed(s.text))); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.Exec("INSERT INTO repo_state(repo,indexed_at) VALUES(?,?) ON CONFLICT(repo) DO UPDATE SET indexed_at=excluded.indexed_at", root, time.Now().UnixMilli()); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
