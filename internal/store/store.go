@@ -2,20 +2,47 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
 func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	// Imports read fingerprints before writing. Reserve the writer at BEGIN
+	// so another process cannot invalidate that read snapshot before the write.
+	dsn := path + "?_txlock=immediate"
+	if path != ":memory:" {
+		absolute, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		u := url.URL{Scheme: "file", Path: absolute, RawQuery: "_txlock=immediate"}
+		dsn = u.String()
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON"); err != nil {
+	// Concurrent first opens can collide while enabling WAL, before SQLite's
+	// busy handler can wait. Retry only this idempotent initialization step.
+	var initializeErr error
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, initializeErr = db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON")
+		var sqliteError interface{ Code() int }
+		if initializeErr == nil || !errors.As(initializeErr, &sqliteError) || sqliteError.Code()&255 != 5 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if initializeErr != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("initializing database: %w", initializeErr)
 	}
 	if err := migrate(db); err != nil {
 		db.Close()
@@ -25,6 +52,11 @@ func Open(path string) (*sql.DB, error) {
 }
 
 func migrate(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	const schema = `
 CREATE TABLE IF NOT EXISTS symbols (id TEXT PRIMARY KEY, repo TEXT NOT NULL, file TEXT NOT NULL,
   name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL, signature TEXT);
@@ -55,30 +87,25 @@ CREATE INDEX IF NOT EXISTS relations_to ON relations(to_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_from ON relations(repo,from_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_to ON relations(repo,to_symbol);
 `
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := tx.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)
 	}
 	var version int
-	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
 	if version < 1 {
 		// The old derived index had unscoped IDs and potentially stale FTS
 		// entries. Rebuild it once rather than carrying corruption forward.
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
 		if _, err := tx.Exec("INSERT INTO symbol_fts(symbol_fts) VALUES('rebuild'); DELETE FROM symbols; DELETE FROM relations; DELETE FROM file_cache; DELETE FROM file_cache_v2; DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); PRAGMA user_version=2"); err != nil {
 			return err
 		}
 		return tx.Commit()
 	}
 	if version < 2 {
-		if _, err := db.Exec("DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); PRAGMA user_version=2"); err != nil {
+		if _, err := tx.Exec("DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); PRAGMA user_version=2"); err != nil {
 			return fmt.Errorf("cleaning obsolete embeddings: %w", err)
 		}
 	}
-	return nil
+	return tx.Commit()
 }
