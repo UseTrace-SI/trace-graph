@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -25,9 +27,16 @@ func excludedSource(rel string) bool {
 // Git decides which source files belong to a checkout, matching Trace capture.
 // Standalone source directories remain supported without requiring Git.
 func walkSources(root string, visit fs.WalkDirFunc) error {
+	return walkSourcesContext(context.Background(), root, visit)
+}
+func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) error {
 	var paths []string
 	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
-		out, err := exec.Command("git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").Output()
+		cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+		var output sourceListBuffer
+		cmd.Stdout = &output
+		err := cmd.Run()
+		out := output.Bytes()
 		if err != nil {
 			return fmt.Errorf("listing repository sources: %w", err)
 		}
@@ -37,6 +46,9 @@ func walkSources(root string, visit fs.WalkDirFunc) error {
 	} else {
 		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
+				return err
+			}
+			if err := ctx.Err(); err != nil {
 				return err
 			}
 			rel, err := filepath.Rel(root, path)
@@ -50,6 +62,9 @@ func walkSources(root string, visit fs.WalkDirFunc) error {
 				return nil
 			}
 			if entry.Type().IsRegular() {
+				if len(paths) >= 100000 {
+					return fmt.Errorf("repository exceeds 100000 source files")
+				}
 				paths = append(paths, rel)
 			}
 			return nil
@@ -80,4 +95,13 @@ func walkSources(root string, visit fs.WalkDirFunc) error {
 		}
 	}
 	return nil
+}
+
+type sourceListBuffer struct{ bytes.Buffer }
+
+func (b *sourceListBuffer) Write(p []byte) (int, error) {
+	if len(p) > 4*1024*1024-b.Len() {
+		return 0, fmt.Errorf("repository path listing exceeds 4 MiB")
+	}
+	return b.Buffer.Write(p)
 }

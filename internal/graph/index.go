@@ -1,9 +1,11 @@
 package graph
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -42,6 +44,12 @@ func filepathExt(path string) string { return filepath.Ext(path) }
 // AnalyzeRepo commits a complete repository generation atomically. Content
 // hashes catch edits even when size and filesystem timestamps are unchanged.
 func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
+	return AnalyzeRepoContext(context.Background(), repo, db)
+}
+
+func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
 	root, err := filepath.Abs(repo)
 	if err != nil {
 		return 0, err
@@ -57,7 +65,7 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 	if !info.IsDir() {
 		return 0, fmt.Errorf("repository is not a directory: %s", root)
 	}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -65,7 +73,11 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 	w := &indexWriter{tx: tx}
 	seen := map[string]bool{}
 	n := 0
-	err = walkSources(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	var totalBytes int64
+	err = walkSourcesContext(ctx, root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -78,13 +90,31 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 		}
 		rel = filepath.ToSlash(rel)
 		seen[rel] = true
-		src, err := os.ReadFile(path)
+		if len(seen) > 100000 {
+			return fmt.Errorf("repository exceeds 100000 source files")
+		}
+		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
+		src, err := io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
+		closeErr := f.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if len(src) > 8*1024*1024 {
+			return fmt.Errorf("source exceeds 8 MiB: %s", rel)
+		}
+		totalBytes += int64(len(src))
+		if totalBytes > 512*1024*1024 {
+			return fmt.Errorf("repository sources exceed 512 MiB")
+		}
 		digest := fmt.Sprintf("%s:%x", analyzerVersion, sha256.Sum256(src))
 		var old string
-		err = tx.QueryRow("SELECT digest FROM file_cache_v2 WHERE repo=? AND path=?", root, rel).Scan(&old)
+		err = tx.QueryRowContext(ctx, "SELECT digest FROM file_cache_v2 WHERE repo=? AND path=?", root, rel).Scan(&old)
 		if err != nil && err != sql.ErrNoRows {
 			return err
 		}
@@ -110,7 +140,7 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("indexing repository: %w", err)
 	}
-	rows, err := tx.Query("SELECT path FROM file_cache_v2 WHERE repo=?", root)
+	rows, err := tx.QueryContext(ctx, "SELECT path FROM file_cache_v2 WHERE repo=?", root)
 	if err != nil {
 		return 0, err
 	}
@@ -135,7 +165,7 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 			return 0, err
 		}
 	}
-	symRows, err := tx.Query("SELECT id,name,COALESCE(signature,'') FROM symbols WHERE repo=?", root)
+	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
 	if err != nil {
 		return 0, err
 	}
@@ -160,6 +190,9 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 		}
 	}
 	if _, err := tx.Exec("INSERT INTO repo_state(repo,indexed_at) VALUES(?,?) ON CONFLICT(repo) DO UPDATE SET indexed_at=excluded.indexed_at", root, time.Now().UnixMilli()); err != nil {
+		return 0, err
+	}
+	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {

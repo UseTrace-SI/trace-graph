@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/UseTrace-SI/trace-graph/internal/embed"
@@ -22,7 +25,7 @@ func refreshCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		count, err := graph.AnalyzeRepo(repoPath, db)
+		count, err := graph.AnalyzeRepoContext(cmd.Context(), repoPath, db)
 		if err != nil {
 			return err
 		}
@@ -61,6 +64,10 @@ func contextCmd() *cobra.Command {
 	var limit int
 	var semantic bool
 	cmd := &cobra.Command{Use: "context", Short: "Read bounded code context as protocol-1 JSON", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
+		defer cancel()
+		cmd.SetContext(ctx)
+
 		if len(path) > 4096 || len(query) > 4096 {
 			return fmt.Errorf("context path or query exceeds 4096 bytes")
 		}
@@ -131,16 +138,19 @@ func contextCmd() *cobra.Command {
 				if v := embed.Decode(vec, embed.Dim); v != nil {
 					score = embed.Cosine(qv, v)
 				}
-				cands = append(cands, scored{item: item, score: score})
+				position := sort.Search(len(cands), func(i int) bool { return cands[i].score < score })
+				if position < limit {
+					cands = append(cands, scored{})
+					copy(cands[position+1:], cands[position:])
+					cands[position] = scored{item: item, score: score}
+					if len(cands) > limit {
+						cands = cands[:limit]
+					}
+				}
 			}
 			rows.Close()
 			if err := rows.Err(); err != nil {
 				return err
-			}
-			for i := 1; i < len(cands); i++ {
-				for j := i; j > 0 && cands[j-1].score < cands[j].score; j-- {
-					cands[j-1], cands[j] = cands[j], cands[j-1]
-				}
 			}
 			if limit > len(cands) {
 				limit = len(cands)

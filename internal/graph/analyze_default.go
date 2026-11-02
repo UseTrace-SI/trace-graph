@@ -94,6 +94,9 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 				id, repo, rel, d.Name.Name, kind, line, "func "+d.Name.Name)
 			n++
+			if d.Body == nil {
+				continue
+			}
 			ast.Inspect(d.Body, func(node ast.Node) bool {
 				if call, ok := node.(*ast.CallExpr); ok {
 					if ident, ok := call.Fun.(*ast.Ident); ok {

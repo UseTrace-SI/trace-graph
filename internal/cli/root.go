@@ -67,9 +67,12 @@ func openDB() (*sql.DB, error) {
 	return store.Open(dbPath)
 }
 
+// Version is set by the coordinated Trace bundle build.
+var Version = "dev"
+
 func versionCmd() *cobra.Command {
 	return &cobra.Command{Use: "version", Run: func(cmd *cobra.Command, args []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), "trace-graph dev")
+		fmt.Fprintln(cmd.OutOrStdout(), "trace-graph "+Version)
 	}}
 }
 
@@ -80,7 +83,7 @@ func analyzeCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		n, err := graph.AnalyzeRepo(repoPath, db)
+		n, err := graph.AnalyzeRepoContext(cmd.Context(), repoPath, db)
 		if err != nil {
 			return err
 		}
@@ -115,7 +118,10 @@ func symbolsCmd() *cobra.Command {
 
 func queryCmd() *cobra.Command {
 	return &cobra.Command{Use: "query", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		q := args[0]
+		q, err := store.LiteralQuery(strings.Join(args, " "))
+		if err != nil {
+			return err
+		}
 		db, err := openDB()
 		if err != nil {
 			return err

@@ -13,7 +13,7 @@ func Open(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL"); err != nil {
+	if _, err := db.Exec("PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -70,10 +70,15 @@ CREATE INDEX IF NOT EXISTS relations_repo_to ON relations(repo,to_symbol);
 			return err
 		}
 		defer tx.Rollback()
-		if _, err := tx.Exec("INSERT INTO symbol_fts(symbol_fts) VALUES('rebuild'); DELETE FROM symbols; DELETE FROM relations; DELETE FROM file_cache; DELETE FROM file_cache_v2; PRAGMA user_version=1"); err != nil {
+		if _, err := tx.Exec("INSERT INTO symbol_fts(symbol_fts) VALUES('rebuild'); DELETE FROM symbols; DELETE FROM relations; DELETE FROM file_cache; DELETE FROM file_cache_v2; DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); PRAGMA user_version=2"); err != nil {
 			return err
 		}
 		return tx.Commit()
+	}
+	if version < 2 {
+		if _, err := db.Exec("DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); PRAGMA user_version=2"); err != nil {
+			return fmt.Errorf("cleaning obsolete embeddings: %w", err)
+		}
 	}
 	return nil
 }

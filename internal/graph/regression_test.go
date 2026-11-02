@@ -61,6 +61,9 @@ func TestRegressionIndexMutationsAndIsolation(t *testing.T) {
 	if count("SELECT count(*) FROM symbol_fts WHERE symbol_fts MATCH 'New'") != 1 {
 		t.Fatal("new symbol missing from search")
 	}
+	if count("SELECT count(*) FROM symbol_embeddings e LEFT JOIN symbols s ON s.id=e.symbol_id WHERE s.id IS NULL") != 0 {
+		t.Fatal("orphan embeddings after rename")
+	}
 	write(b, "package main\nfunc New() { New() }\n")
 	index(b)
 	if count("SELECT count(*) FROM symbols WHERE name='New'") != 2 {
@@ -70,6 +73,9 @@ func TestRegressionIndexMutationsAndIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	index(a)
+	if count("SELECT count(*) FROM symbol_embeddings e LEFT JOIN symbols s ON s.id=e.symbol_id WHERE s.id IS NULL") != 0 {
+		t.Fatal("orphan embeddings after deletion")
+	}
 	if count("SELECT count(*) FROM symbols WHERE repo=?", a) != 0 || count("SELECT count(*) FROM relations WHERE repo=?", a) != 0 {
 		t.Fatal("deleted file remains indexed")
 	}

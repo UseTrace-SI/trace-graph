@@ -2,6 +2,12 @@
 
 Code map for Trace: analyzes a repository and maps files, symbols, and relationships.
 
+The coordinated Trace bundle supplies this executable beside the other two
+local components, with one release version. With an approved personal connection,
+CLI publishes bounded derived context to the hosted dashboard. Raw companion
+SQLite files and manual/MCP-authored Brain notes remain local. Graph snapshots
+describe the checkout when indexed, with their index timestamp.
+
 ## Commands
 - `trace-graph version`
 - `trace-graph analyze [--repo .]`
@@ -29,3 +35,9 @@ Validation: `go test -race ./...`, `go test -race -tags treesitter ./...`, and e
 
 `.github/workflows/ci.yml` runs pure Go builds, vet, race tests, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
 Tree-sitter vet, race tests, and 100-run regressions are also included.
+
+## Production bounds
+
+Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. Local embeddings are hashed word projections rather than a learned semantic model.
+
+Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused.
