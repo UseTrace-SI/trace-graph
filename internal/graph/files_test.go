@@ -56,3 +56,33 @@ func TestCompanionIndexExcludesIgnoredAndPrivateState(t *testing.T) {
 		t.Fatalf("newly ignored source remained indexed: %d %v", n, err)
 	}
 }
+
+func TestProjectExclusionsRemoveDerivedSymbols(t *testing.T) {
+	root := t.TempDir()
+	for name, content := range map[string]string{"keep.go": "package p\nfunc Keep(){}\n", "private.go": "package p\nfunc Private(){}\n"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := AnalyzeRepo(root, db); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".traceignore"), []byte("private.go\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AnalyzeRepo(root, db); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM symbols WHERE name='Private'").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("excluded code still indexed: %d %v", n, err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM symbols WHERE name='Keep'").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("unrelated code removed: %d %v", n, err)
+	}
+}

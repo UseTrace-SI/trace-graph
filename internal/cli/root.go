@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -152,7 +153,7 @@ func neighborsCmd() *cobra.Command {
 		}
 		defer db.Close()
 		name := args[0]
-		rows, err := db.Query("SELECT file,line,kind FROM symbols WHERE name=? AND repo=?", name, repoPath)
+		rows, err := db.Query("SELECT file,line,kind FROM symbols WHERE (name=? OR id=?) AND repo=?", name, name, repoPath)
 		if err != nil {
 			return err
 		}
@@ -171,7 +172,8 @@ func neighborsCmd() *cobra.Command {
 			return err
 		}
 		rows.Close()
-		r2, err := db.Query("SELECT DISTINCT from_symbol,file,line FROM relations WHERE to_symbol=? AND repo=? ORDER BY file,line", name, repoPath)
+		r2, err := db.Query(`SELECT DISTINCT r.from_symbol,r.file,r.line FROM relations r LEFT JOIN relation_targets t ON t.relation_id=r.id
+ WHERE r.repo=? AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line`, repoPath, repoPath, name, name, name)
 		if err != nil {
 			return err
 		}
@@ -197,7 +199,7 @@ func impactCmd() *cobra.Command {
 		}
 		defer db.Close()
 		name := args[0]
-		rows, err := db.Query("SELECT DISTINCT file FROM relations WHERE repo=? AND (to_symbol=? OR from_symbol=?)", repoPath, name, name)
+		rows, err := db.Query(`SELECT DISTINCT r.file FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.repo=? AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR t.from_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)))`, repoPath, repoPath, name, name, repoPath, name, name)
 		if err != nil {
 			return err
 		}
@@ -240,11 +242,7 @@ func defCmd() *cobra.Command {
 
 func capabilitiesCmd() *cobra.Command {
 	return &cobra.Command{Use: "capabilities", Run: func(cmd *cobra.Command, args []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), "semantic (treesitter build): go, python, javascript, typescript, rust, java, c, cpp, ruby")
-		fmt.Fprintln(cmd.OutOrStdout(), "inventory (default build): python, javascript, typescript, rust, java, c, cpp, ruby, and others")
-		fmt.Fprintln(cmd.OutOrStdout(), "relationships: calls (go, python, javascript, typescript, rust, java, c, cpp, ruby)")
-		fmt.Fprintln(cmd.OutOrStdout(), "co-change: git history based")
-		fmt.Fprintln(cmd.OutOrStdout(), "cache: repository-scoped content hashes")
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(graph.Capabilities())
 	}}
 }
 
