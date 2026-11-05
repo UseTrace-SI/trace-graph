@@ -32,11 +32,12 @@ var tsLangs = map[string]*ts.Language{
 	".rb":   ts.NewLanguage(tsrb.Language()),
 }
 
-const analyzerVersion = "treesitter-v2"
+const analyzerVersion = "treesitter-v3"
 
 func supportedFile(ext string) bool { _, ok := tsLangs[ext]; return ok }
 
 func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, error) {
+	db.namespace = rel
 	n := 0
 	lang := tsLangs[strings.ToLower(filepathExt(rel))]
 	parser := ts.NewParser()
@@ -95,6 +96,9 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 					if n == nil {
 						return
 					}
+					if n.Id() != node.Id() && (strings.Contains(n.Kind(), "function") || strings.Contains(n.Kind(), "method")) {
+						return
+					}
 					if n.Kind() == "call_expression" || n.Kind() == "call" || n.Kind() == "method_invocation" {
 						fn := n.ChildByFieldName("function")
 						if fn == nil {
@@ -106,9 +110,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 							if idx := strings.LastIndex(callee, "."); idx >= 0 {
 								callee = callee[idx+1:]
 							}
-							rid := rel + ":" + name + "->" + callee + ":" + itoa(int(n.StartPosition().Row)+1)
-							db.Exec("INSERT OR REPLACE INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)",
-								rid, repo, name, callee, "call", rel, int(n.StartPosition().Row)+1)
+							db.call(repo, rel, id, name, callee, int(n.StartPosition().Row)+1, int(n.StartPosition().Column)+1, "unresolved")
 						}
 					}
 					for i := uint(0); i < n.ChildCount(); i++ {

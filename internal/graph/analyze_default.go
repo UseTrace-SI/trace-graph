@@ -3,14 +3,19 @@
 package graph
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
+	pathpkg "path"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
 var langExts = map[string]string{
+	".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".mts": "typescript", ".cts": "typescript",
 	".go":     "go",
 	".py":     "python",
 	".js":     "javascript",
@@ -55,10 +60,11 @@ var langExts = map[string]string{
 }
 
 var symbolPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=\s*(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*(?::[^=]+)?=>`),
 	regexp.MustCompile(`(?m)^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)`),
-	regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)`),
+	regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)`),
 	regexp.MustCompile(`(?m)^\s*(?:export\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)`),
-	regexp.MustCompile(`(?m)^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)`),
+	regexp.MustCompile(`(?m)^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)`),
 	regexp.MustCompile(`(?m)^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 	regexp.MustCompile(`(?m)^\s*(?:public|private|protected)?\s*(?:static\s+)?(?:class|interface|enum|struct|trait|object|protocol)\s+([A-Za-z_][A-Za-z0-9_]*)`),
 	regexp.MustCompile(`(?m)^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)`),
@@ -68,7 +74,7 @@ var symbolPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\s*defn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 }
 
-const analyzerVersion = "inventory-v2"
+const analyzerVersion = "inventory-v3"
 
 func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
 
@@ -76,10 +82,27 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 	if langExts[strings.ToLower(filepathExt(rel))] != "go" {
 		return analyzeRegexFile(repo, rel, string(src), db)
 	}
+	db.namespace = pathpkg.Dir(rel)
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, src, parser.ParseComments)
 	if err != nil {
 		return analyzeRegexFile(repo, rel, string(src), db)
+	}
+	db.namespace = pathpkg.Dir(rel) + "|" + file.Name.Name
+	imports := map[string]string{}
+	module := moduleName(repo)
+	for _, imp := range file.Imports {
+		importPath, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			continue
+		}
+		alias := pathpkg.Base(importPath)
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		}
+		if module != "" && strings.HasPrefix(importPath, module+"/") {
+			imports[alias] = strings.TrimPrefix(importPath, module+"/")
+		}
 	}
 	n := 0
 	for _, decl := range file.Decls {
@@ -92,23 +115,35 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			}
 			id := rel + ":" + d.Name.Name + ":" + itoa(line)
 			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-				id, repo, rel, d.Name.Name, kind, line, "func "+d.Name.Name)
+				id, repo, rel, d.Name.Name, kind, line, goSignature(fset, d))
 			n++
 			if d.Body == nil {
 				continue
 			}
 			ast.Inspect(d.Body, func(node ast.Node) bool {
-				if call, ok := node.(*ast.CallExpr); ok {
-					if ident, ok := call.Fun.(*ast.Ident); ok {
-						rid := rel + ":" + d.Name.Name + "->" + ident.Name + ":" + itoa(fset.Position(call.Pos()).Line)
-						db.Exec("INSERT OR REPLACE INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)",
-							rid, repo, d.Name.Name, ident.Name, "call", rel, fset.Position(call.Pos()).Line)
+				// A closure's calls belong to the closure, not to the enclosing function.
+				if _, ok := node.(*ast.FuncLit); ok {
+					return false
+				}
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch fn := call.Fun.(type) {
+				case *ast.Ident:
+					hint := "unresolved"
+					if fn.Obj == nil || fn.Obj.Kind == ast.Fun {
+						hint = "identifier"
 					}
-					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-						rid := rel + ":" + d.Name.Name + "->" + sel.Sel.Name + ":" + itoa(fset.Position(call.Pos()).Line)
-						db.Exec("INSERT OR REPLACE INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)",
-							rid, repo, d.Name.Name, sel.Sel.Name, "call", rel, fset.Position(call.Pos()).Line)
+					db.call(repo, rel, id, d.Name.Name, fn.Name, fset.Position(call.Pos()).Line, fset.Position(call.Pos()).Column, hint)
+				case *ast.SelectorExpr:
+					hint := "unresolved"
+					if alias, ok := fn.X.(*ast.Ident); ok && alias.Obj == nil {
+						if dir, ok := imports[alias.Name]; ok {
+							hint = "package:" + dir
+						}
 					}
+					db.call(repo, rel, id, d.Name.Name, fn.Sel.Name, fset.Position(call.Pos()).Line, fset.Position(call.Pos()).Column, hint)
 				}
 				return true
 			})
@@ -137,7 +172,9 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 }
 
 func analyzeRegexFile(repo, rel, src string, db *indexWriter) (int, error) {
-	lines := strings.Split(src, "\n")
+	db.namespace = pathpkg.Dir(rel)
+	lines := strings.Split(maskInventory(src), "\n")
+	original := strings.Split(src, "\n")
 	n := 0
 	for i, line := range lines {
 		for _, pat := range symbolPatterns {
@@ -152,7 +189,7 @@ func analyzeRegexFile(repo, rel, src string, db *indexWriter) (int, error) {
 				}
 				id := rel + ":" + name + ":" + itoa(i+1)
 				db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-					id, repo, rel, name, kind, i+1, strings.TrimSpace(line))
+					id, repo, rel, name, kind, i+1, strings.TrimSpace(original[i]))
 				n++
 				break
 			}
@@ -171,4 +208,15 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+func goSignature(fset *token.FileSet, d *ast.FuncDecl) string {
+	copy := *d
+	copy.Body = nil
+	copy.Doc = nil
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, &copy); err != nil {
+		return "func " + d.Name.Name
+	}
+	return buf.String()
 }

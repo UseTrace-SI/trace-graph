@@ -45,3 +45,22 @@ Ordinary search text is interpreted as literal words, including punctuation. Con
 Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused.
 
 Production builds select Go 1.27.3 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26; release builds reject a different compiler. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
+
+## Analysis quality and confidence
+
+`trace-graph capabilities` returns JSON for the analyzer actually compiled into
+the executable. Default builds use Go AST analysis and lexical inventory for
+other languages, including JS module extensions and simple TypeScript arrow
+functions. Comment/string declarations are masked during lexical inventory.
+This is not a type-checked language-service graph.
+
+Go calls resolve to unique package-function identities and module-local imported
+functions when unambiguous. Source symbol IDs, optional target IDs and `lexical`
+or `unresolved` status are returned with relationships. Member dispatch and
+ambiguous targets stay unresolved. Context selects edges by symbol identity,
+preventing same-name functions in different packages from sharing callers.
+Tree-sitter builds report observed calls and unresolved targets explicitly.
+
+Graph honors the same project-root `.traceignore` syntax as CLI capture. An
+excluded file's old derived symbols disappear on the next successful generation.
+This upgrade invalidates the previous derived index once; run `refresh` to rebuild.

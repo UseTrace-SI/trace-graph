@@ -26,10 +26,11 @@ func excludedSource(rel string) bool {
 
 // Git decides which source files belong to a checkout, matching Trace capture.
 // Standalone source directories remain supported without requiring Git.
-func walkSources(root string, visit fs.WalkDirFunc) error {
-	return walkSourcesContext(context.Background(), root, visit)
-}
 func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) error {
+	ignored, err := projectExclusions(root)
+	if err != nil {
+		return err
+	}
 	var paths []string
 	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
 		cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
@@ -55,7 +56,7 @@ func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) 
 			if err != nil {
 				return err
 			}
-			if rel != "." && excludedSource(rel) {
+			if rel != "." && (excludedSource(rel) || ignored(rel)) {
 				if entry.IsDir() {
 					return filepath.SkipDir
 				}
@@ -73,7 +74,7 @@ func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) 
 		}
 	}
 	for _, rel := range paths {
-		if rel == "" || excludedSource(rel) || !supportedFile(strings.ToLower(filepath.Ext(rel))) {
+		if rel == "" || excludedSource(rel) || ignored(rel) || !supportedFile(strings.ToLower(filepath.Ext(rel))) {
 			continue
 		}
 		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(filepath.ToSlash(rel), "../") {

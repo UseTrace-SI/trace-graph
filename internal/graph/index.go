@@ -18,8 +18,9 @@ import (
 // indexWriter preserves the first database error, including writes made from
 // parser callbacks. The surrounding transaction is never committed on failure.
 type indexWriter struct {
-	tx  *sql.Tx
-	err error
+	tx        *sql.Tx
+	err       error
+	namespace string
 }
 
 func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
@@ -36,7 +37,10 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 	}
 	r, err := w.tx.Exec(query, args...)
 	w.err = err
-	return r, err
+	if err == nil && strings.Contains(query, "INTO symbols") {
+		_, w.err = w.tx.Exec("INSERT INTO symbol_scopes(symbol_id,repo,namespace) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET namespace=excluded.namespace", args[0], args[1], w.namespace)
+	}
+	return r, w.err
 }
 
 func filepathExt(path string) string { return filepath.Ext(path) }
@@ -164,6 +168,9 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if err := removeFile(tx, root, path); err != nil {
 			return 0, err
 		}
+	}
+	if err := resolveCalls(ctx, tx, root); err != nil {
+		return 0, err
 	}
 	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
 	if err != nil {

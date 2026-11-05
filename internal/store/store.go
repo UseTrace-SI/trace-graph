@@ -86,6 +86,12 @@ CREATE INDEX IF NOT EXISTS relations_from ON relations(from_symbol);
 CREATE INDEX IF NOT EXISTS relations_to ON relations(to_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_from ON relations(repo,from_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_to ON relations(repo,to_symbol);
+CREATE TABLE IF NOT EXISTS symbol_scopes(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,repo TEXT NOT NULL,namespace TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS symbol_scopes_namespace ON symbol_scopes(repo,namespace);
+CREATE TABLE IF NOT EXISTS relation_targets(relation_id TEXT PRIMARY KEY REFERENCES relations(id) ON DELETE CASCADE,from_id TEXT NOT NULL,to_id TEXT,namespace TEXT NOT NULL,hint TEXT NOT NULL,resolution TEXT NOT NULL DEFAULT 'unresolved');
+CREATE INDEX IF NOT EXISTS relation_targets_from ON relation_targets(from_id);
+CREATE INDEX IF NOT EXISTS relation_targets_to ON relation_targets(to_id);
+
 `
 	if _, err := tx.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)
@@ -97,13 +103,13 @@ CREATE INDEX IF NOT EXISTS relations_repo_to ON relations(repo,to_symbol);
 	if version < 1 {
 		// The old derived index had unscoped IDs and potentially stale FTS
 		// entries. Rebuild it once rather than carrying corruption forward.
-		if _, err := tx.Exec("INSERT INTO symbol_fts(symbol_fts) VALUES('rebuild'); DELETE FROM symbols; DELETE FROM relations; DELETE FROM file_cache; DELETE FROM file_cache_v2; DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); PRAGMA user_version=2"); err != nil {
+		if _, err := tx.Exec("INSERT INTO symbol_fts(symbol_fts) VALUES('rebuild'); DELETE FROM symbols; DELETE FROM relations; DELETE FROM file_cache; DELETE FROM file_cache_v2; DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); DELETE FROM relations; DELETE FROM symbols; DELETE FROM file_cache_v2; DELETE FROM repo_state; PRAGMA user_version=3"); err != nil {
 			return err
 		}
 		return tx.Commit()
 	}
-	if version < 2 {
-		if _, err := tx.Exec("DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); PRAGMA user_version=2"); err != nil {
+	if version < 3 {
+		if _, err := tx.Exec("DELETE FROM symbol_embeddings WHERE symbol_id NOT IN (SELECT id FROM symbols); DELETE FROM relations; DELETE FROM symbols; DELETE FROM file_cache_v2; DELETE FROM repo_state; PRAGMA user_version=3"); err != nil {
 			return fmt.Errorf("cleaning obsolete embeddings: %w", err)
 		}
 	}

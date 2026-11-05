@@ -40,6 +40,7 @@ type codeContext struct {
 	IndexedAt int64          `json:"indexed_at,omitempty"`
 	Symbols   []codeSymbol   `json:"symbols"`
 	Relations []codeRelation `json:"relations"`
+	Analysis  graph.Analysis `json:"analysis"`
 }
 
 type codeSymbol struct {
@@ -52,11 +53,14 @@ type codeSymbol struct {
 }
 
 type codeRelation struct {
-	From string `json:"from_symbol"`
-	To   string `json:"to_symbol"`
-	Kind string `json:"kind"`
-	File string `json:"file"`
-	Line int    `json:"line"`
+	FromID     string `json:"from_symbol_id,omitempty"`
+	ToID       string `json:"to_symbol_id,omitempty"`
+	Resolution string `json:"resolution"`
+	From       string `json:"from_symbol"`
+	To         string `json:"to_symbol"`
+	Kind       string `json:"kind"`
+	File       string `json:"file"`
+	Line       int    `json:"line"`
 }
 
 func contextCmd() *cobra.Command {
@@ -71,7 +75,7 @@ func contextCmd() *cobra.Command {
 		if len(path) > 4096 || len(query) > 4096 {
 			return fmt.Errorf("context path or query exceeds 4096 bytes")
 		}
-		out := codeContext{Protocol: 1, Status: "missing_index", Repo: repoPath, Symbols: []codeSymbol{}, Relations: []codeRelation{}}
+		out := codeContext{Analysis: graph.Capabilities(), Protocol: 1, Status: "missing_index", Repo: repoPath, Symbols: []codeSymbol{}, Relations: []codeRelation{}}
 		encode := func() error { return json.NewEncoder(cmd.OutOrStdout()).Encode(out) }
 		if path != "" {
 			path = filepath.ToSlash(filepath.Clean(path))
@@ -138,6 +142,9 @@ func contextCmd() *cobra.Command {
 				if v := embed.Decode(vec, embed.Dim); v != nil {
 					score = embed.Cosine(qv, v)
 				}
+				if score <= 0 {
+					continue
+				}
 				position := sort.Search(len(cands), func(i int) bool { return cands[i].score < score })
 				if position < limit {
 					cands = append(cands, scored{})
@@ -179,7 +186,11 @@ func contextCmd() *cobra.Command {
 				q += ` AND s.file=?`
 				args = append(args, path)
 			}
-			q += ` ORDER BY s.file,s.line,s.id LIMIT ?`
+			if path == "" && len(words) > 0 {
+				q += ` ORDER BY bm25(symbol_fts),s.file,s.line,s.id LIMIT ?`
+			} else {
+				q += ` ORDER BY s.file,s.line,s.id LIMIT ?`
+			}
 			args = append(args, limit)
 			rows, err := db.QueryContext(cmd.Context(), q, args...)
 			if err != nil {
@@ -205,20 +216,20 @@ func contextCmd() *cobra.Command {
 			args := []any{repoPath}
 			for _, s := range out.Symbols {
 				placeholders = append(placeholders, "?")
-				args = append(args, s.Name)
+				args = append(args, s.ID)
 			}
 			for _, s := range out.Symbols {
-				args = append(args, s.Name)
+				args = append(args, s.ID)
 			}
 			in := strings.Join(placeholders, ",")
-			rows, err := db.QueryContext(cmd.Context(), `SELECT from_symbol,to_symbol,kind,file,line FROM relations WHERE repo=? AND (from_symbol IN (`+in+`) OR to_symbol IN (`+in+`)) ORDER BY file,line,id LIMIT 50`, args...)
+			rows, err := db.QueryContext(cmd.Context(), `SELECT r.from_symbol,r.to_symbol,r.kind,r.file,r.line,t.from_id,COALESCE(t.to_id,''),t.resolution FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.repo=? AND (t.from_id IN (`+in+`) OR t.to_id IN (`+in+`)) ORDER BY r.file,r.line,r.id LIMIT 50`, args...)
 			if err != nil {
 				return err
 			}
 			defer rows.Close()
 			for rows.Next() {
 				var item codeRelation
-				if err := rows.Scan(&item.From, &item.To, &item.Kind, &item.File, &item.Line); err != nil {
+				if err := rows.Scan(&item.From, &item.To, &item.Kind, &item.File, &item.Line, &item.FromID, &item.ToID, &item.Resolution); err != nil {
 					return err
 				}
 				out.Relations = append(out.Relations, item)
