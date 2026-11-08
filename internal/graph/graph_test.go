@@ -29,4 +29,3 @@ func TestAnalyzeRepo(t *testing.T) {
 		t.Fatalf("Foo not found")
 	}
 }
-
