@@ -45,6 +45,8 @@ type RevisionStats struct {
 	NonRegular   int   `json:"non_regular"`
 	Observations int   `json:"observations"`
 	SourceBytes  int64 `json:"source_bytes"`
+	sources      []revisionSource
+	paths        map[string]bool
 }
 
 // The explicit flags fail closed on older Git, prohibit lazy network fetches
@@ -330,6 +332,15 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 	} else if side != "base" {
 		return stats, fmt.Errorf("comparison side must be base or head")
 	}
+	stats.paths = make(map[string]bool, len(selected.entries))
+	for _, entry := range selected.entries {
+		stats.paths[entry.file] = true
+		for i := 0; i < len(entry.file); i++ {
+			if entry.file[i] == '/' {
+				stats.paths[entry.file[:i]] = true
+			}
+		}
+	}
 	rows, err := db.QueryContext(ctx, "PRAGMA database_list")
 	if err != nil {
 		return stats, err
@@ -411,6 +422,7 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 		}
 		stats.Files++
 		stats.SourceBytes += entry.size
+		stats.sources = append(stats.sources, revisionSource{file: entry.file, extension: strings.ToLower(path.Ext(entry.file)), hash: fmt.Sprintf("%x", sha256.Sum256(data))})
 	}
 	if err := resolveCalls(ctx, tx, p.root); err != nil {
 		return stats, err

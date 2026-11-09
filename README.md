@@ -19,7 +19,7 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-graph health`
 - `trace-graph snapshot [--limit 100000]`
 - `trace-graph changes --base snapshot.ndjson`
-- `trace-graph compare --base REF [--head REF]`
+- `trace-graph compare --base REF [--head REF] [--detect-renames]`
 - `trace-graph refresh [--repo .]` (index and return protocol-1 JSON)
 - `trace-graph context [--path FILE] [--query words]` (bounded, read-only protocol-1 JSON)
 
@@ -115,5 +115,21 @@ Limits are two minutes, 4 MiB of tree listing per revision, 100,000 tree entries
 8 MiB per source, 512 MiB of source and 100,000 symbol/relationship observations per
 revision, 64 KiB per policy or signature, 32 MiB of symbol metadata per revision and
 32 MiB of output. An error emits no partial report. This compares observed symbols;
-rename tracking, type-aware behavioral analysis and file-only Git diffs remain
-outside this command.
+type-aware behavioral analysis and complete file-only Git diffs remain outside
+this command.
+
+Add `--detect-renames` to pair unique exact-content source-file relocations with
+the same extension. SHA-256 is computed from the committed bytes already analyzed;
+both paths must be absent from the other tree, including as a directory or symlink.
+Exactly one eligible source with that content and extension may exist in each
+revision. The report
+adds `file_renames` with original/new paths and whole-file hashes. Matched symbols
+retain both locations and use `file_moved`; ambiguous overloads remain explicit.
+Files without observed symbols can still appear in `file_renames`.
+
+Duplicate-content candidates appear in `rename_ambiguities` with matching counts,
+and their symbols keep ordinary added/removed changes. Copies and edited moves
+are not paired. Different extensions are not paired even when their bytes match.
+This is content evidence of relocation, not proof of author intent or Git history.
+The option defaults off, retaining ordinary comparison classifications. Symbol
+renaming, similarity-based edited moves and type-aware analysis remain open.

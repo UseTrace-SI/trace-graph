@@ -82,7 +82,11 @@ func changesCmd() *cobra.Command {
 }
 
 func compareSymbols(previous, current []snapshotSymbol) []symbolChange {
-	before, after := groupSymbols(previous), groupSymbols(current)
+	return compareSymbolsWithRenames(previous, current, nil)
+}
+
+func compareSymbolsWithRenames(previous, current []snapshotSymbol, renamed map[string]string) []symbolChange {
+	before, after := groupSymbolsForFiles(previous, renamed), groupSymbols(current)
 	keys := map[string]bool{}
 	for k := range before {
 		keys[k] = true
@@ -115,6 +119,8 @@ func compareSymbols(previous, current []snapshotSymbol) []symbolChange {
 			kind = "unverified"
 		case a[0].SourceHash != b[0].SourceHash:
 			kind = "source_changed"
+		case a[0].File != b[0].File:
+			kind = "file_moved"
 		case a[0].Line != b[0].Line:
 			kind = "moved"
 		}
@@ -149,9 +155,17 @@ func sameSnapshotSymbols(a, b []snapshotSymbol) bool {
 }
 
 func groupSymbols(symbols []snapshotSymbol) map[string][]snapshotSymbol {
+	return groupSymbolsForFiles(symbols, nil)
+}
+
+func groupSymbolsForFiles(symbols []snapshotSymbol, renamed map[string]string) map[string][]snapshotSymbol {
 	result := map[string][]snapshotSymbol{}
 	for _, s := range symbols {
-		key := s.File + "\x00" + s.Kind + "\x00" + s.Name
+		file := s.File
+		if target, ok := renamed[file]; ok {
+			file = target
+		}
+		key := file + "\x00" + s.Kind + "\x00" + s.Name
 		result[key] = append(result[key], s)
 	}
 	return result

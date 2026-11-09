@@ -67,6 +67,7 @@ func readRevisionSymbols(ctx context.Context, db *sql.DB, repo string) ([]snapsh
 }
 func compareCmd() *cobra.Command {
 	var base, head string
+	var detectRenames bool
 	cmd := &cobra.Command{Use: "compare --base REF [--head REF]", Short: "Compare symbols in two local Git commits without changing the checkout or index", SilenceUsage: true, SilenceErrors: true, Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		if base == "" {
 			return fmt.Errorf("--base requires a local commit reference")
@@ -98,14 +99,24 @@ func compareCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		differences := compareSymbols(previous, current)
+		renameMode := "disabled"
+		renames, ambiguous := []graph.FileRename{}, []graph.RenameAmbiguity{}
+		renamed := map[string]string{}
+		if detectRenames {
+			renameMode = "unique_exact_content_same_extension"
+			renames, ambiguous = graph.ExactFileRenames(baseStats, headStats)
+			for _, rename := range renames {
+				renamed[rename.From] = rename.To
+			}
+		}
+		differences := compareSymbolsWithRenames(previous, current, renamed)
 		changes := make([]revisionChange, 0, len(differences))
 		for _, change := range differences {
 			changes = append(changes, revisionChange{Kind: change.Kind, File: change.File, Name: change.Name, Before: revisionSymbols(change.Before), After: revisionSymbols(change.After)})
 		}
 		// Buffer the bounded report so any failure emits no misleading partial JSON.
 		var output compareBuffer
-		if err := json.NewEncoder(&output).Encode(map[string]any{"protocol": 1, "repo": repoPath, "base_commit": pair.BaseCommit, "head_commit": pair.HeadCommit, "policy_hash": pair.PolicyHash, "exclusions": "current_and_both_commits", "analysis": graph.Capabilities(), "source_mode": "local_git_objects", "signatures": "sha256_only", "base": baseStats, "head": headStats, "changes": changes}); err != nil {
+		if err := json.NewEncoder(&output).Encode(map[string]any{"protocol": 1, "repo": repoPath, "base_commit": pair.BaseCommit, "head_commit": pair.HeadCommit, "policy_hash": pair.PolicyHash, "exclusions": "current_and_both_commits", "analysis": graph.Capabilities(), "source_mode": "local_git_objects", "signatures": "sha256_only", "rename_detection": renameMode, "file_renames": renames, "rename_ambiguities": ambiguous, "base": baseStats, "head": headStats, "changes": changes}); err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
@@ -116,6 +127,7 @@ func compareCmd() *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&base, "base", "", "base commit reference (required; resolved once)")
 	cmd.Flags().StringVar(&head, "head", "HEAD", "head commit reference (resolved once)")
+	cmd.Flags().BoolVar(&detectRenames, "detect-renames", false, "pair only unique exact-content relocated files with the same extension")
 	return cmd
 }
 
