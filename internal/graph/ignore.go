@@ -2,30 +2,21 @@ package graph
 
 import (
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
 )
 
 // Keep the documented .traceignore contract identical to CLI capture: relative
 // paths, directory prefixes and single-level globs; no negation or ** patterns.
 func projectExclusions(root string) (func(string) bool, error) {
-	file := filepath.Join(root, ".traceignore")
-	info, err := os.Lstat(file)
-	if os.IsNotExist(err) {
-		return func(string) bool { return false }, nil
-	}
+	b, err := readProjectPolicy(root)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > 65536 {
-		return nil, fmt.Errorf(".traceignore must be a regular file at most 64 KiB")
-	}
-	b, err := os.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
+	return parseProjectExclusions(b)
+}
+
+func parseProjectExclusions(b []byte) (func(string) bool, error) {
 	if len(b) > 65536 {
 		return nil, fmt.Errorf(".traceignore exceeds 64 KiB")
 	}

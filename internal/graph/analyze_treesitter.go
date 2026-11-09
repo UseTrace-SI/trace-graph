@@ -32,7 +32,7 @@ var tsLangs = map[string]*ts.Language{
 	".rb":   ts.NewLanguage(tsrb.Language()),
 }
 
-const analyzerVersion = "treesitter-v3"
+const analyzerVersion = "treesitter-v4"
 
 func supportedFile(ext string) bool { _, ok := tsLangs[ext]; return ok }
 
@@ -89,6 +89,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 				id := rel + ":" + name + ":" + itoa(line)
 				db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 					id, repo, rel, name, symKind, line, kind+" "+name)
+				db.content(repo, id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
 				n++
 				// calls within: find call_expression children
 				var findCalls func(n *ts.Node)

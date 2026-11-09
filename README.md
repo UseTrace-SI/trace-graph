@@ -2,6 +2,8 @@
 
 Code map for Trace: analyzes a repository and maps files, symbols, and relationships.
 
+Licensed under [Apache-2.0](LICENSE).
+
 The coordinated Trace bundle supplies this executable beside the other two
 local components, with one release version. With an approved personal connection,
 CLI publishes bounded derived context to the hosted dashboard. Raw companion
@@ -13,6 +15,11 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-graph analyze [--repo .]`
 - `trace-graph symbols`
 - `trace-graph query <term>`
+- `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--json]`
+- `trace-graph health`
+- `trace-graph snapshot [--limit 100000]`
+- `trace-graph changes --base snapshot.ndjson`
+- `trace-graph compare --base REF [--head REF] [--detect-renames]`
 - `trace-graph refresh [--repo .]` (index and return protocol-1 JSON)
 - `trace-graph context [--path FILE] [--query words]` (bounded, read-only protocol-1 JSON)
 
@@ -54,13 +61,75 @@ other languages, including JS module extensions and simple TypeScript arrow
 functions. Comment/string declarations are masked during lexical inventory.
 This is not a type-checked language-service graph.
 
-Go calls resolve to unique package-function identities and module-local imported
-functions when unambiguous. Source symbol IDs, optional target IDs and `lexical`
-or `unresolved` status are returned with relationships. Member dispatch and
-ambiguous targets stay unresolved. Context selects edges by symbol identity,
+Go calls resolve to unique package-function identities, module-local imported
+functions, explicit local receiver methods, same-file type aliases and receivers
+from literal, copied-value or locally typed-conversion initializers when unambiguous. Source
+symbol IDs, optional target IDs and `lexical` or `unresolved` status are returned
+with relationships. Resolution follows bounded syntax evidence, with tests checked
+against Go's type checker. Dynamic dispatch, cross-file aliases, factory returns,
+package-shadowable builtins such as `new`, promoted embedded methods and ambiguous
+targets stay unresolved. Context selects edges by symbol identity,
 preventing same-name functions in different packages from sharing callers.
 Tree-sitter builds report observed calls and unresolved targets explicitly.
 
 Graph honors the same project-root `.traceignore` syntax as CLI capture. An
 excluded file's old derived symbols disappear on the next successful generation.
 This upgrade invalidates the previous derived index once; run `refresh` to rebuild.
+
+## Impact, health and graph snapshots
+
+`impact` walks resolved symbol identities transitively, with cycle detection,
+repository isolation, a two-second deadline, depth 1–20 and at most 1,000 returned
+symbols. Ambiguous names require an explicit ID; capped results report
+`truncated: true`. Unresolved observations are never guessed into graph edges.
+`health` reports index time, file/symbol counts and resolved/unresolved call counts.
+
+`snapshot` streams versioned `trace.graph/v1` NDJSON from one read transaction,
+including parser limitations, symbol source hashes, relationships and a completion
+record. A missing completion record means an interrupted export. A capped export
+has `truncated: true`. These inspection commands never create or migrate an index.
+
+`changes --base FILE` compares a complete snapshot with the current index. It
+reports additions, removals, signature/source changes and line movement; ambiguous
+overloads remain explicit. It requires the same repository identity and analyzer
+build and refuses incomplete/capped snapshots. Go AST and Tree-sitter symbols have
+syntax-span hashes; lexical inventory hashes only its observed declaration line.
+This is source comparison, not a proof of behavior or a type-checked Git revision
+diff. Run `refresh` after upgrading to populate the new source hashes.
+
+`compare --base REF [--head REF]` compares symbols in two locally available Git
+commits (head defaults to `HEAD`). It resolves each reference once and analyzes raw
+Git objects in memory, leaving the checkout, Git index, refs and persistent Graph
+database untouched. Through the coordinated CLI use
+`trace --repo /path/to/repo graph compare --base main --head HEAD`.
+Select the working-tree root with `--repo`; subdirectories and bare repositories
+are refused. Git must support `--no-lazy-fetch`; missing objects fail without a
+fetch. Object replacements, checkout filters, symlinks and submodules are skipped.
+
+The JSON report records exact commit IDs, analyzer limits, exclusion-policy hash,
+source counts and symbol changes. It returns source/signature hashes and symbol
+locations, without raw source or signature values. Built-in secret exclusions and
+the union of current, base and head `.traceignore` rules apply to both revisions.
+Invalid policies and ambiguous same-line symbol identities fail the comparison.
+Limits are two minutes, 4 MiB of tree listing per revision, 100,000 tree entries,
+8 MiB per source, 512 MiB of source and 100,000 symbol/relationship observations per
+revision, 64 KiB per policy or signature, 32 MiB of symbol metadata per revision and
+32 MiB of output. An error emits no partial report. This compares observed symbols;
+type-aware behavioral analysis and complete file-only Git diffs remain outside
+this command.
+
+Add `--detect-renames` to pair unique exact-content source-file relocations with
+the same extension. SHA-256 is computed from the committed bytes already analyzed;
+both paths must be absent from the other tree, including as a directory or symlink.
+Exactly one eligible source with that content and extension may exist in each
+revision. The report
+adds `file_renames` with original/new paths and whole-file hashes. Matched symbols
+retain both locations and use `file_moved`; ambiguous overloads remain explicit.
+Files without observed symbols can still appear in `file_renames`.
+
+Duplicate-content candidates appear in `rename_ambiguities` with matching counts,
+and their symbols keep ordinary added/removed changes. Copies and edited moves
+are not paired. Different extensions are not paired even when their bytes match.
+This is content evidence of relocation, not proof of author intent or Git history.
+The option defaults off, retaining ordinary comparison classifications. Symbol
+renaming, similarity-based edited moves and type-aware analysis remain open.
