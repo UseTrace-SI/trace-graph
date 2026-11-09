@@ -90,7 +90,12 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 	}
 	db.namespace = pathpkg.Dir(rel) + "|" + file.Name.Name
 	imports := map[string]string{}
-	module := moduleName(repo)
+	module := ""
+	if db.moduleOverride != nil {
+		module = *db.moduleOverride
+	} else {
+		module = moduleName(repo)
+	}
 	for _, imp := range file.Imports {
 		importPath, err := strconv.Unquote(imp.Path.Value)
 		if err != nil {

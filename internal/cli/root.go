@@ -54,6 +54,7 @@ func newRoot() *cobra.Command {
 	root.AddCommand(healthCmd())
 	root.AddCommand(snapshotCmd())
 	root.AddCommand(changesCmd())
+	root.AddCommand(compareCmd())
 	root.AddCommand(defCmd())
 	root.AddCommand(cochangeCmd())
 	root.AddCommand(capabilitiesCmd())

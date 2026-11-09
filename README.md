@@ -19,6 +19,7 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-graph health`
 - `trace-graph snapshot [--limit 100000]`
 - `trace-graph changes --base snapshot.ndjson`
+- `trace-graph compare --base REF [--head REF]`
 - `trace-graph refresh [--repo .]` (index and return protocol-1 JSON)
 - `trace-graph context [--path FILE] [--query words]` (bounded, read-only protocol-1 JSON)
 
@@ -95,3 +96,24 @@ build and refuses incomplete/capped snapshots. Go AST and Tree-sitter symbols ha
 syntax-span hashes; lexical inventory hashes only its observed declaration line.
 This is source comparison, not a proof of behavior or a type-checked Git revision
 diff. Run `refresh` after upgrading to populate the new source hashes.
+
+`compare --base REF [--head REF]` compares symbols in two locally available Git
+commits (head defaults to `HEAD`). It resolves each reference once and analyzes raw
+Git objects in memory, leaving the checkout, Git index, refs and persistent Graph
+database untouched. Through the coordinated CLI use
+`trace --repo /path/to/repo graph compare --base main --head HEAD`.
+Select the working-tree root with `--repo`; subdirectories and bare repositories
+are refused. Git must support `--no-lazy-fetch`; missing objects fail without a
+fetch. Object replacements, checkout filters, symlinks and submodules are skipped.
+
+The JSON report records exact commit IDs, analyzer limits, exclusion-policy hash,
+source counts and symbol changes. It returns source/signature hashes and symbol
+locations, without raw source or signature values. Built-in secret exclusions and
+the union of current, base and head `.traceignore` rules apply to both revisions.
+Invalid policies and ambiguous same-line symbol identities fail the comparison.
+Limits are two minutes, 4 MiB of tree listing per revision, 100,000 tree entries,
+8 MiB per source, 512 MiB of source and 100,000 symbol/relationship observations per
+revision, 64 KiB per policy or signature, 32 MiB of symbol metadata per revision and
+32 MiB of output. An error emits no partial report. This compares observed symbols;
+rename tracking, type-aware behavioral analysis and file-only Git diffs remain
+outside this command.

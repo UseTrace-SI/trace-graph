@@ -74,61 +74,66 @@ func changesCmd() *cobra.Command {
 		if len(current) > 100000 {
 			return fmt.Errorf("comparison exceeds 100000 symbols")
 		}
-		before, after := groupSymbols(previous), groupSymbols(current)
-		keys := map[string]bool{}
-		for k := range before {
-			keys[k] = true
-		}
-		for k := range after {
-			keys[k] = true
-		}
-		ordered := make([]string, 0, len(keys))
-		for k := range keys {
-			ordered = append(ordered, k)
-		}
-		sort.Strings(ordered)
-		changes := []symbolChange{}
-		for _, key := range ordered {
-			a, b := before[key], after[key]
-			if len(a) > 1 && sameSnapshotSymbols(a, b) {
-				continue
-			}
-			kind := ""
-			switch {
-			case len(a) > 1 || len(b) > 1:
-				kind = "ambiguous"
-			case len(a) == 0:
-				kind = "added"
-			case len(b) == 0:
-				kind = "removed"
-			case a[0].Signature != b[0].Signature:
-				kind = "signature_changed"
-			case a[0].SourceHash == "" || b[0].SourceHash == "":
-				kind = "unverified"
-			case a[0].SourceHash != b[0].SourceHash:
-				kind = "source_changed"
-			case a[0].Line != b[0].Line:
-				kind = "moved"
-			}
-			if kind == "" {
-				continue
-			}
-			sample := a
-			if len(sample) == 0 {
-				sample = b
-			}
-			if a == nil {
-				a = []snapshotSymbol{}
-			}
-			if b == nil {
-				b = []snapshotSymbol{}
-			}
-			changes = append(changes, symbolChange{Kind: kind, File: sample[0].File, Name: sample[0].Name, Before: a, After: b})
-		}
+		changes := compareSymbols(previous, current)
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "repo": repoPath, "indexed_at": indexed, "analysis": graph.Capabilities(), "changes": changes})
 	}}
 	cmd.Flags().StringVar(&base, "base", "", "complete NDJSON snapshot to compare against")
 	return cmd
+}
+
+func compareSymbols(previous, current []snapshotSymbol) []symbolChange {
+	before, after := groupSymbols(previous), groupSymbols(current)
+	keys := map[string]bool{}
+	for k := range before {
+		keys[k] = true
+	}
+	for k := range after {
+		keys[k] = true
+	}
+	ordered := make([]string, 0, len(keys))
+	for k := range keys {
+		ordered = append(ordered, k)
+	}
+	sort.Strings(ordered)
+	changes := []symbolChange{}
+	for _, key := range ordered {
+		a, b := before[key], after[key]
+		if len(a) > 1 && sameSnapshotSymbols(a, b) {
+			continue
+		}
+		kind := ""
+		switch {
+		case len(a) > 1 || len(b) > 1:
+			kind = "ambiguous"
+		case len(a) == 0:
+			kind = "added"
+		case len(b) == 0:
+			kind = "removed"
+		case a[0].Signature != b[0].Signature:
+			kind = "signature_changed"
+		case a[0].SourceHash == "" || b[0].SourceHash == "":
+			kind = "unverified"
+		case a[0].SourceHash != b[0].SourceHash:
+			kind = "source_changed"
+		case a[0].Line != b[0].Line:
+			kind = "moved"
+		}
+		if kind == "" {
+			continue
+		}
+		sample := a
+		if len(sample) == 0 {
+			sample = b
+		}
+		if a == nil {
+			a = []snapshotSymbol{}
+		}
+		if b == nil {
+			b = []snapshotSymbol{}
+		}
+		changes = append(changes, symbolChange{Kind: kind, File: sample[0].File, Name: sample[0].Name, Before: a, After: b})
+	}
+	return changes
 }
 
 func sameSnapshotSymbols(a, b []snapshotSymbol) bool {

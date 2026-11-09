@@ -18,14 +18,34 @@ import (
 // indexWriter preserves the first database error, including writes made from
 // parser callbacks. The surrounding transaction is never committed on failure.
 type indexWriter struct {
-	tx        *sql.Tx
-	err       error
-	namespace string
+	tx              *sql.Tx
+	err             error
+	namespace       string
+	moduleOverride  *string
+	maxRecords      int
+	records         int
+	revisionSymbols map[string]bool
 }
 
 func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 	if w.err != nil {
 		return nil, w.err
+	}
+	if w.maxRecords > 0 && w.records >= w.maxRecords {
+		w.err = fmt.Errorf("revision comparison exceeds %d observations", w.maxRecords)
+		return nil, w.err
+	}
+	w.records++
+	if w.maxRecords > 0 && strings.Contains(query, "INTO symbols") {
+		if w.revisionSymbols == nil {
+			w.revisionSymbols = map[string]bool{}
+		}
+		id := args[0].(string)
+		if w.revisionSymbols[id] {
+			w.err = fmt.Errorf("revision contains colliding declaration identities; separate same-name declarations onto different lines")
+			return nil, w.err
+		}
+		w.revisionSymbols[id] = true
 	}
 	// Symbol and relation IDs must be unique across repositories in one DB.
 	args[0] = fmt.Sprintf("%x:%s", sha256.Sum256([]byte(args[1].(string))), args[0])

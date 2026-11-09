@@ -48,7 +48,11 @@ func moduleName(repo string) string {
 	defer f.Close()
 	var b [4096]byte
 	n, _ := f.Read(b[:])
-	for _, line := range strings.Split(string(b[:n]), "\n") {
+	return moduleFromText(b[:n])
+}
+
+func moduleFromText(data []byte) string {
+	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == "module" {
 			return strings.Trim(fields[1], `"`)
