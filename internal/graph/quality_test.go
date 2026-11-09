@@ -39,7 +39,7 @@ func TestQualifiedCallsDoNotMixPackagesOrMethods(t *testing.T) {
 	if err := db.QueryRow("SELECT count(*) FROM relation_targets WHERE resolution='unresolved' AND to_id IS NULL").Scan(&unresolved); err != nil {
 		t.Fatal(err)
 	}
-	if resolved != 3 || unresolved != 1 {
+	if resolved != 4 || unresolved != 0 {
 		t.Fatalf("incorrect resolution: resolved=%d unresolved=%d", resolved, unresolved)
 	}
 	var n int

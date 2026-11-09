@@ -14,13 +14,14 @@ import (
 func Open(path string) (*sql.DB, error) {
 	// Imports read fingerprints before writing. Reserve the writer at BEGIN
 	// so another process cannot invalidate that read snapshot before the write.
-	dsn := path + "?_txlock=immediate"
+	options := url.Values{"_txlock": {"immediate"}, "_pragma": {"busy_timeout(30000)", "foreign_keys(1)", "journal_mode(WAL)"}}
+	dsn := path + "?" + options.Encode()
 	if path != ":memory:" {
 		absolute, err := filepath.Abs(path)
 		if err != nil {
 			return nil, err
 		}
-		u := url.URL{Scheme: "file", Path: absolute, RawQuery: "_txlock=immediate"}
+		u := url.URL{Scheme: "file", Path: absolute, RawQuery: options.Encode()}
 		dsn = u.String()
 	}
 	db, err := sql.Open("sqlite", dsn)
@@ -88,6 +89,8 @@ CREATE INDEX IF NOT EXISTS relations_repo_from ON relations(repo,from_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_to ON relations(repo,to_symbol);
 CREATE TABLE IF NOT EXISTS symbol_scopes(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,repo TEXT NOT NULL,namespace TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS symbol_scopes_namespace ON symbol_scopes(repo,namespace);
+CREATE TABLE IF NOT EXISTS symbol_content(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,source_hash TEXT NOT NULL,end_line INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS symbol_receivers(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,receiver TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS relation_targets(relation_id TEXT PRIMARY KEY REFERENCES relations(id) ON DELETE CASCADE,from_id TEXT NOT NULL,to_id TEXT,namespace TEXT NOT NULL,hint TEXT NOT NULL,resolution TEXT NOT NULL DEFAULT 'unresolved');
 CREATE INDEX IF NOT EXISTS relation_targets_from ON relation_targets(from_id);
 CREATE INDEX IF NOT EXISTS relation_targets_to ON relation_targets(to_id);

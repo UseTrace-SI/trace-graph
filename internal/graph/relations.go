@@ -23,14 +23,15 @@ func (w *indexWriter) call(repo, rel, fromID, fromName, toName string, line, col
 	_, w.err = w.tx.Exec("INSERT INTO relation_targets(relation_id,from_id,namespace,hint) VALUES(?,?,?,?) ON CONFLICT(relation_id) DO NOTHING", scopedID(repo, id), scopedID(repo, fromID), w.namespace, hint)
 }
 
-// Resolve only unique package-level functions. Member dispatch, closures and
-// ambiguous names remain explicit observations rather than guessed edges.
+// Resolve unique package functions and explicitly declared local receiver
+// methods. Dynamic dispatch and ambiguous names remain unresolved observations.
 func resolveCalls(ctx context.Context, tx *sql.Tx, repo string) error {
 	_, err := tx.ExecContext(ctx, `UPDATE relation_targets AS t SET to_id=(
- SELECT min(s.id) FROM symbols s JOIN symbol_scopes scope ON scope.symbol_id=s.id JOIN relations r ON r.id=t.relation_id
- WHERE s.repo=? AND s.name=r.to_symbol AND s.kind='func' AND (
- (t.hint='identifier' AND scope.namespace=t.namespace) OR
- (substr(t.hint,1,8)='package:' AND substr(scope.namespace,1,instr(scope.namespace,'|')-1)=substr(t.hint,9)))
+ SELECT min(s.id) FROM symbols s JOIN symbol_scopes scope ON scope.symbol_id=s.id JOIN relations r ON r.id=t.relation_id LEFT JOIN symbol_receivers receiver ON receiver.symbol_id=s.id
+ WHERE s.repo=? AND s.name=r.to_symbol AND (
+ (s.kind='func' AND t.hint='identifier' AND scope.namespace=t.namespace) OR
+ (s.kind='func' AND substr(t.hint,1,8)='package:' AND substr(scope.namespace,1,instr(scope.namespace,'|')-1)=substr(t.hint,9)) OR
+ (s.kind='method' AND substr(t.hint,1,9)='receiver:' AND scope.namespace=t.namespace AND receiver.receiver=substr(t.hint,10)))
  HAVING count(*)=1),resolution='unresolved' WHERE relation_id IN (SELECT id FROM relations WHERE repo=?)`, repo, repo)
 	if err != nil {
 		return err

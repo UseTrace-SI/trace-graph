@@ -50,7 +50,10 @@ func newRoot() *cobra.Command {
 	root.AddCommand(symbolsCmd())
 	root.AddCommand(queryCmd())
 	root.AddCommand(neighborsCmd())
-	root.AddCommand(impactCmd())
+	root.AddCommand(transitiveImpactCmd())
+	root.AddCommand(healthCmd())
+	root.AddCommand(snapshotCmd())
+	root.AddCommand(changesCmd())
 	root.AddCommand(defCmd())
 	root.AddCommand(cochangeCmd())
 	root.AddCommand(capabilitiesCmd())
@@ -188,31 +191,6 @@ func neighborsCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s  %s:%d\n", sym, file, line)
 		}
 		return r2.Err()
-	}}
-}
-
-func impactCmd() *cobra.Command {
-	return &cobra.Command{Use: "impact", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
-		if err != nil {
-			return err
-		}
-		defer db.Close()
-		name := args[0]
-		rows, err := db.Query(`SELECT DISTINCT r.file FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.repo=? AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR t.from_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)))`, repoPath, repoPath, name, name, repoPath, name, name)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		fmt.Fprintf(cmd.OutOrStdout(), "files potentially affected by %s:\n", name)
-		for rows.Next() {
-			var f string
-			if err := rows.Scan(&f); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", f)
-		}
-		return rows.Err()
 	}}
 }
 

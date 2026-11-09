@@ -74,7 +74,7 @@ var symbolPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\s*defn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 }
 
-const analyzerVersion = "inventory-v3"
+const analyzerVersion = "inventory-v5"
 
 func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
 
@@ -116,6 +116,12 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			id := rel + ":" + d.Name.Name + ":" + itoa(line)
 			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 				id, repo, rel, d.Name.Name, kind, line, goSignature(fset, d))
+			db.content(repo, id, src[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset], fset.Position(d.End()).Line)
+			if d.Recv != nil && len(d.Recv.List) == 1 {
+				if receiver := declaredTypeName(d.Recv.List[0].Type); receiver != "" && db.err == nil {
+					_, db.err = db.tx.Exec("INSERT INTO symbol_receivers(symbol_id,receiver) VALUES(?,?) ON CONFLICT(symbol_id) DO UPDATE SET receiver=excluded.receiver", scopedID(repo, id), receiver)
+				}
+			}
 			n++
 			if d.Body == nil {
 				continue
@@ -143,6 +149,11 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 							hint = "package:" + dir
 						}
 					}
+					if hint == "unresolved" {
+						if receiver := receiverType(fn.X); receiver != "" {
+							hint = "receiver:" + receiver
+						}
+					}
 					db.call(repo, rel, id, d.Name.Name, fn.Sel.Name, fset.Position(call.Pos()).Line, fset.Position(call.Pos()).Column, hint)
 				}
 				return true
@@ -154,6 +165,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 					id := rel + ":" + ts.Name.Name + ":" + itoa(line)
 					db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 						id, repo, rel, ts.Name.Name, "type", line, "type "+ts.Name.Name)
+					db.content(repo, id, src[fset.Position(ts.Pos()).Offset:fset.Position(ts.End()).Offset], fset.Position(ts.End()).Line)
 					n++
 				}
 				if vs, ok := spec.(*ast.ValueSpec); ok {
@@ -162,6 +174,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 						id := rel + ":" + nm.Name + ":" + itoa(line)
 						db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 							id, repo, rel, nm.Name, "var", line, "var "+nm.Name)
+						db.content(repo, id, src[fset.Position(vs.Pos()).Offset:fset.Position(vs.End()).Offset], fset.Position(vs.End()).Line)
 						n++
 					}
 				}
@@ -190,6 +203,7 @@ func analyzeRegexFile(repo, rel, src string, db *indexWriter) (int, error) {
 				id := rel + ":" + name + ":" + itoa(i+1)
 				db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 					id, repo, rel, name, kind, i+1, strings.TrimSpace(original[i]))
+				db.content(repo, id, []byte(original[i]), i+1)
 				n++
 				break
 			}

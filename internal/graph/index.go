@@ -43,6 +43,13 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 	return r, w.err
 }
 
+func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
+	if w.err != nil {
+		return
+	}
+	_, w.err = w.tx.Exec("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
+}
+
 func filepathExt(path string) string { return filepath.Ext(path) }
 
 // AnalyzeRepo commits a complete repository generation atomically. Content

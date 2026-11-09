@@ -2,6 +2,8 @@
 
 Code map for Trace: analyzes a repository and maps files, symbols, and relationships.
 
+Licensed under [Apache-2.0](LICENSE).
+
 The coordinated Trace bundle supplies this executable beside the other two
 local components, with one release version. With an approved personal connection,
 CLI publishes bounded derived context to the hosted dashboard. Raw companion
@@ -13,6 +15,10 @@ describe the checkout when indexed, with their index timestamp.
 - `trace-graph analyze [--repo .]`
 - `trace-graph symbols`
 - `trace-graph query <term>`
+- `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--json]`
+- `trace-graph health`
+- `trace-graph snapshot [--limit 100000]`
+- `trace-graph changes --base snapshot.ndjson`
 - `trace-graph refresh [--repo .]` (index and return protocol-1 JSON)
 - `trace-graph context [--path FILE] [--query words]` (bounded, read-only protocol-1 JSON)
 
@@ -54,13 +60,35 @@ other languages, including JS module extensions and simple TypeScript arrow
 functions. Comment/string declarations are masked during lexical inventory.
 This is not a type-checked language-service graph.
 
-Go calls resolve to unique package-function identities and module-local imported
-functions when unambiguous. Source symbol IDs, optional target IDs and `lexical`
-or `unresolved` status are returned with relationships. Member dispatch and
-ambiguous targets stay unresolved. Context selects edges by symbol identity,
+Go calls resolve to unique package-function identities, module-local imported
+functions and explicitly declared local receiver methods when unambiguous. Source
+symbol IDs, optional target IDs and `lexical` or `unresolved` status are returned
+with relationships. Dynamic dispatch, aliases, inferred receivers and ambiguous
+targets stay unresolved. Context selects edges by symbol identity,
 preventing same-name functions in different packages from sharing callers.
 Tree-sitter builds report observed calls and unresolved targets explicitly.
 
 Graph honors the same project-root `.traceignore` syntax as CLI capture. An
 excluded file's old derived symbols disappear on the next successful generation.
 This upgrade invalidates the previous derived index once; run `refresh` to rebuild.
+
+## Impact, health and graph snapshots
+
+`impact` walks resolved symbol identities transitively, with cycle detection,
+repository isolation, a two-second deadline, depth 1–20 and at most 1,000 returned
+symbols. Ambiguous names require an explicit ID; capped results report
+`truncated: true`. Unresolved observations are never guessed into graph edges.
+`health` reports index time, file/symbol counts and resolved/unresolved call counts.
+
+`snapshot` streams versioned `trace.graph/v1` NDJSON from one read transaction,
+including parser limitations, symbol source hashes, relationships and a completion
+record. A missing completion record means an interrupted export. A capped export
+has `truncated: true`. These inspection commands never create or migrate an index.
+
+`changes --base FILE` compares a complete snapshot with the current index. It
+reports additions, removals, signature/source changes and line movement; ambiguous
+overloads remain explicit. It requires the same repository identity and analyzer
+build and refuses incomplete/capped snapshots. Go AST and Tree-sitter symbols have
+syntax-span hashes; lexical inventory hashes only its observed declaration line.
+This is source comparison, not a proof of behavior or a type-checked Git revision
+diff. Run `refresh` after upgrading to populate the new source hashes.
