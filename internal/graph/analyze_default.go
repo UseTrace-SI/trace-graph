@@ -74,7 +74,7 @@ var symbolPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\s*defn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 }
 
-const analyzerVersion = "inventory-v5"
+const analyzerVersion = "inventory-v6"
 
 func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
 

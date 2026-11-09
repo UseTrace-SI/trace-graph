@@ -61,9 +61,12 @@ functions. Comment/string declarations are masked during lexical inventory.
 This is not a type-checked language-service graph.
 
 Go calls resolve to unique package-function identities, module-local imported
-functions and explicitly declared local receiver methods when unambiguous. Source
+functions, explicit local receiver methods, same-file type aliases and receivers
+from literal, copied-value or locally typed-conversion initializers when unambiguous. Source
 symbol IDs, optional target IDs and `lexical` or `unresolved` status are returned
-with relationships. Dynamic dispatch, aliases, inferred receivers and ambiguous
+with relationships. Resolution follows bounded syntax evidence, with tests checked
+against Go's type checker. Dynamic dispatch, cross-file aliases, factory returns,
+package-shadowable builtins such as `new`, promoted embedded methods and ambiguous
 targets stay unresolved. Context selects edges by symbol identity,
 preventing same-name functions in different packages from sharing callers.
 Tree-sitter builds report observed calls and unresolved targets explicitly.
