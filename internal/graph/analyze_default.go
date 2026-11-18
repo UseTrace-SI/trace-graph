@@ -74,7 +74,7 @@ var symbolPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\s*defn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 }
 
-const analyzerVersion = "inventory-v6"
+const analyzerVersion = "inventory-v7"
 
 func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
 
@@ -191,24 +191,26 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 
 func analyzeRegexFile(repo, rel, src string, db *indexWriter) (int, error) {
 	db.namespace = pathpkg.Dir(rel)
+	// Classification and the source hash use the masked line. A trailing
+	// "// class marker" comment must not turn an arrow function into a type.
 	lines := strings.Split(maskInventory(src), "\n")
-	original := strings.Split(src, "\n")
 	n := 0
 	for i, line := range lines {
 		for _, pat := range symbolPatterns {
 			m := pat.FindStringSubmatch(line)
 			if len(m) >= 2 {
 				name := m[1]
+				visible := strings.TrimSpace(line)
 				kind := "symbol"
-				if strings.Contains(line, "func ") || strings.Contains(line, "def ") || strings.Contains(line, "fn ") || strings.Contains(line, "function ") || strings.Contains(line, "fun ") {
+				if strings.Contains(visible, "func ") || strings.Contains(visible, "def ") || strings.Contains(visible, "fn ") || strings.Contains(visible, "function ") || strings.Contains(visible, "fun ") {
 					kind = "func"
-				} else if strings.Contains(line, "class ") || strings.Contains(line, "interface ") || strings.Contains(line, "enum ") || strings.Contains(line, "type ") || strings.Contains(line, "struct ") || strings.Contains(line, "trait ") || strings.Contains(line, "object ") || strings.Contains(line, "protocol ") || strings.Contains(line, "module ") || strings.Contains(line, "defmodule ") || strings.Contains(line, "defn ") {
+				} else if strings.Contains(visible, "class ") || strings.Contains(visible, "interface ") || strings.Contains(visible, "enum ") || strings.Contains(visible, "type ") || strings.Contains(visible, "struct ") || strings.Contains(visible, "trait ") || strings.Contains(visible, "object ") || strings.Contains(visible, "protocol ") || strings.Contains(visible, "module ") || strings.Contains(visible, "defmodule ") || strings.Contains(visible, "defn ") {
 					kind = "type"
 				}
 				id := rel + ":" + name + ":" + itoa(i+1)
 				db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-					id, repo, rel, name, kind, i+1, strings.TrimSpace(original[i]))
-				db.content(repo, id, []byte(original[i]), i+1)
+					id, repo, rel, name, kind, i+1, visible)
+				db.content(repo, id, []byte(visible), i+1)
 				n++
 				break
 			}
