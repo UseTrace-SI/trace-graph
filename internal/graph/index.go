@@ -76,6 +76,29 @@ func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
 
 func filepathExt(path string) string { return filepath.Ext(path) }
 
+// go.mod is configuration, not a source, so it is not walked as a file. Its
+// module path still changes how imports resolve. Fold its content into every
+// file's cache key so a module-only edit forces a fresh analysis.
+func goModDigest(root string) (string, error) {
+	f, err := os.Open(filepath.Join(root, "go.mod"))
+	if os.IsNotExist(err) {
+		return "absent", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	const limit = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > limit {
+		return "", fmt.Errorf("go.mod exceeds 1 MiB")
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
 // AnalyzeRepo commits a complete repository generation atomically. Content
 // hashes catch edits even when size and filesystem timestamps are unchanged.
 func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
@@ -99,6 +122,10 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	}
 	if !info.IsDir() {
 		return 0, fmt.Errorf("repository is not a directory: %s", root)
+	}
+	modDigest, err := goModDigest(root)
+	if err != nil {
+		return 0, fmt.Errorf("reading go.mod: %w", err)
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -147,7 +174,7 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if totalBytes > 512*1024*1024 {
 			return fmt.Errorf("repository sources exceed 512 MiB")
 		}
-		digest := fmt.Sprintf("%s:%x", analyzerVersion, sha256.Sum256(src))
+		digest := fmt.Sprintf("%s:%s:%x", analyzerVersion, modDigest, sha256.Sum256(src))
 		var old string
 		err = tx.QueryRowContext(ctx, "SELECT digest FROM file_cache_v2 WHERE repo=? AND path=?", root, rel).Scan(&old)
 		if err != nil && err != sql.ErrNoRows {
