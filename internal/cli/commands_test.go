@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/UseTrace-SI/trace-graph/internal/graph"
 )
 
 func TestSymbolsQueryDefAndVersionCommands(t *testing.T) {
@@ -41,8 +43,12 @@ func TestSymbolsQueryDefAndVersionCommands(t *testing.T) {
 	if got := run("query", "AND", "OR"); strings.TrimSpace(got) != "" {
 		t.Fatalf("literal query returned rows: %s", got)
 	}
-	if got := run("def", "Alpha"); !strings.Contains(got, "func Alpha") {
-		t.Fatalf("def missing signature: %s", got)
+	wantSignature := "func Alpha"
+	if strings.HasPrefix(graph.Capabilities().Analyzer, "treesitter") {
+		wantSignature = "function_declaration Alpha"
+	}
+	if got := run("def", "Alpha"); !strings.Contains(got, wantSignature) {
+		t.Fatalf("def missing signature %q: %s", wantSignature, got)
 	}
 	if got := run("version"); !strings.HasPrefix(got, "trace-graph ") {
 		t.Fatalf("unexpected version output: %s", got)
