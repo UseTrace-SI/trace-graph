@@ -12,6 +12,15 @@ import (
 	"github.com/UseTrace-SI/trace-graph/internal/store"
 )
 
+// gitVersionAtLeast skips version-sensitive fixtures when the local Git is too
+// old (for example SHA-256 object format requires Git 2.29 or newer).
+func gitVersionAtLeast(t *testing.T, major, minor int) {
+	t.Helper()
+	if !gitMeetsVersion(major, minor) {
+		t.Skipf("requires Git >= %d.%d", major, minor)
+	}
+}
+
 func revisionTestGit(t *testing.T, root string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0"}, args...)...)
@@ -45,6 +54,12 @@ func revisionTestRepo(t *testing.T) string {
 	}
 	revisionTestGit(t, root, "init", "-q")
 	return root
+}
+
+func TestGitVersionAtLeastParsesInstalledVersion(t *testing.T) {
+	if !gitMeetsVersion(1, 0) || gitMeetsVersion(99, 0) {
+		t.Fatal("implausible Git version probe")
+	}
 }
 
 func TestRevisionIndexesUseCommittedSourcesModuleAndUnionOfExclusions(t *testing.T) {
@@ -131,6 +146,7 @@ func TestRevisionComparisonRejectsCollidingDeclarationIdentities(t *testing.T) {
 }
 
 func TestRevisionComparisonSupportsSHA256CommitIdentities(t *testing.T) {
+	gitVersionAtLeast(t, 2, 29)
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
