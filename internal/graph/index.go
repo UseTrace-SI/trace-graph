@@ -24,7 +24,7 @@ type indexWriter struct {
 	moduleOverride  *string
 	maxRecords      int
 	records         int
-	revisionSymbols map[string]bool
+	symbolIDs       map[string]bool
 }
 
 func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
@@ -36,16 +36,20 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 		return nil, w.err
 	}
 	w.records++
-	if w.maxRecords > 0 && strings.Contains(query, "INTO symbols") {
-		if w.revisionSymbols == nil {
-			w.revisionSymbols = map[string]bool{}
+	// Declaration identities are derived from file, name and line. Two
+	// same-name declarations on one line would silently overwrite each other
+	// (losing signature and receiver data and producing wrong edges), so reject
+	// collisions in every mode, not just revision comparisons.
+	if strings.Contains(query, "INTO symbols") {
+		if w.symbolIDs == nil {
+			w.symbolIDs = map[string]bool{}
 		}
 		id := args[0].(string)
-		if w.revisionSymbols[id] {
-			w.err = fmt.Errorf("revision contains colliding declaration identities; separate same-name declarations onto different lines")
+		if w.symbolIDs[id] {
+			w.err = fmt.Errorf("repository contains colliding declaration identities; separate same-name declarations onto different lines")
 			return nil, w.err
 		}
-		w.revisionSymbols[id] = true
+		w.symbolIDs[id] = true
 	}
 	// Symbol and relation IDs must be unique across repositories in one DB.
 	args[0] = fmt.Sprintf("%x:%s", sha256.Sum256([]byte(args[1].(string))), args[0])
