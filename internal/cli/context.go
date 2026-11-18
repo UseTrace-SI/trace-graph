@@ -114,50 +114,71 @@ func contextCmd() *cobra.Command {
 		if limit <= 0 || limit > 50 {
 			limit = 20
 		}
+		words := strings.FieldsFunc(query, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' })
+		if len(words) > 16 {
+			words = words[:16]
+		}
+		for i := range words {
+			words[i] = `"` + words[i] + `"`
+		}
+		useFTS := len(words) > 0
 		if semantic && strings.TrimSpace(query) != "" {
+			// Bound the SQL scan so a large index cannot require decoding every
+			// embedding under the same deadline. Results are best-effort when
+			// the deadline expires mid-scan.
+			const semanticScanCap = 2000
 			q := `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048),e.vector FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=?`
 			args := []any{repoPath}
 			if path != "" {
 				q += ` AND s.file=?`
 				args = append(args, path)
 			}
-			rows, err := db.QueryContext(cmd.Context(), q, args...)
-			if err != nil {
-				return err
-			}
+			q += ` ORDER BY s.file,s.line,s.id LIMIT ?`
+			args = append(args, semanticScanCap)
 			type scored struct {
 				item  codeSymbol
 				score float64
 			}
 			qv := embed.Embed(query)
 			var cands []scored
-			for rows.Next() {
-				var item codeSymbol
-				var vec []byte
-				if err := rows.Scan(&item.ID, &item.File, &item.Name, &item.Kind, &item.Line, &item.Signature, &vec); err != nil {
-					rows.Close()
+			if cmd.Context().Err() == nil {
+				rows, err := db.QueryContext(cmd.Context(), q, args...)
+				if err != nil {
 					return err
 				}
-				score := 0.0
-				if v := embed.Decode(vec, embed.Dim); v != nil {
-					score = embed.Cosine(qv, v)
-				}
-				if score <= 0 {
-					continue
-				}
-				position := sort.Search(len(cands), func(i int) bool { return cands[i].score < score })
-				if position < limit {
-					cands = append(cands, scored{})
-					copy(cands[position+1:], cands[position:])
-					cands[position] = scored{item: item, score: score}
-					if len(cands) > limit {
-						cands = cands[:limit]
+				for rows.Next() {
+					if cmd.Context().Err() != nil {
+						break
+					}
+					var item codeSymbol
+					var vec []byte
+					if err := rows.Scan(&item.ID, &item.File, &item.Name, &item.Kind, &item.Line, &item.Signature, &vec); err != nil {
+						rows.Close()
+						return err
+					}
+					score := 0.0
+					if v := embed.Decode(vec, embed.Dim); v != nil {
+						score = embed.Cosine(qv, v)
+					}
+					if score <= 0 {
+						continue
+					}
+					position := sort.Search(len(cands), func(i int) bool { return cands[i].score < score })
+					if position < limit {
+						cands = append(cands, scored{})
+						copy(cands[position+1:], cands[position:])
+						cands[position] = scored{item: item, score: score}
+						if len(cands) > limit {
+							cands = cands[:limit]
+						}
 					}
 				}
-			}
-			rows.Close()
-			if err := rows.Err(); err != nil {
-				return err
+				rows.Close()
+				if cmd.Context().Err() == nil {
+					if err := rows.Err(); err != nil {
+						return err
+					}
+				}
 			}
 			if limit > len(cands) {
 				limit = len(cands)
@@ -168,14 +189,9 @@ func contextCmd() *cobra.Command {
 		} else {
 			q := `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048) FROM symbols s`
 			var args []any
-			words := strings.FieldsFunc(query, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' })
-			if len(words) > 16 {
-				words = words[:16]
-			}
-			for i := range words {
-				words[i] = `"` + words[i] + `"`
-			}
-			if path == "" && len(words) > 0 {
+			if useFTS {
+				// FTS and path filters are applied together; a supplied --path
+				// must not silently discard --query.
 				q += ` JOIN symbol_fts f ON f.rowid=s.rowid WHERE symbol_fts MATCH ? AND s.repo=?`
 				args = append(args, strings.Join(words, " OR "), repoPath)
 			} else {
@@ -186,7 +202,7 @@ func contextCmd() *cobra.Command {
 				q += ` AND s.file=?`
 				args = append(args, path)
 			}
-			if path == "" && len(words) > 0 {
+			if useFTS {
 				q += ` ORDER BY bm25(symbol_fts),s.file,s.line,s.id LIMIT ?`
 			} else {
 				q += ` ORDER BY s.file,s.line,s.id LIMIT ?`
@@ -211,7 +227,7 @@ func contextCmd() *cobra.Command {
 			}
 		}
 		// Include callers and outgoing relationships for the selected symbols.
-		if len(out.Symbols) > 0 {
+		if cmd.Context().Err() == nil && len(out.Symbols) > 0 {
 			var placeholders []string
 			args := []any{repoPath}
 			for _, s := range out.Symbols {
@@ -242,7 +258,7 @@ func contextCmd() *cobra.Command {
 		return encode()
 	}}
 	cmd.Flags().StringVar(&path, "path", "", "repository-relative file")
-	cmd.Flags().StringVar(&query, "query", "", "symbol words (used when path is empty)")
+	cmd.Flags().StringVar(&query, "query", "", "symbol words (FTS MATCH, combinable with --path and --semantic)")
 	cmd.Flags().IntVar(&limit, "limit", 20, "maximum symbols (1-50)")
 	cmd.Flags().BoolVar(&semantic, "semantic", false, "rank symbols by local embedding similarity")
 	return cmd
