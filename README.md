@@ -125,7 +125,7 @@ locations, without raw source or signature values. Built-in secret exclusions an
 the union of current, base and head `.traceignore` rules apply to both revisions.
 Invalid policies and ambiguous same-line symbol identities fail the comparison.
 Limits are two minutes, 4 MiB of tree listing per revision, 100,000 tree entries,
-8 MiB per source, 512 MiB of source and 100,000 symbol/relationship observations per
+8 MiB per source, 512 MiB of source and 100,000 symbol/relationship observation rows per
 revision, 64 KiB per policy or signature, 32 MiB of symbol metadata per revision and
 32 MiB of output. An error emits no partial report. This compares observed symbols;
 type-aware behavioral analysis and complete file-only Git diffs remain outside
