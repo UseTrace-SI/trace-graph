@@ -124,7 +124,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			db.content(repo, id, src[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset], fset.Position(d.End()).Line)
 			if d.Recv != nil && len(d.Recv.List) == 1 {
 				if receiver := declaredTypeName(d.Recv.List[0].Type); receiver != "" && db.err == nil {
-					_, db.err = db.tx.Exec("INSERT INTO symbol_receivers(symbol_id,receiver) VALUES(?,?) ON CONFLICT(symbol_id) DO UPDATE SET receiver=excluded.receiver", scopedID(repo, id), receiver)
+					_, _ = db.write("INSERT INTO symbol_receivers(symbol_id,receiver) VALUES(?,?) ON CONFLICT(symbol_id) DO UPDATE SET receiver=excluded.receiver", scopedID(repo, id), receiver)
 				}
 			}
 			n++

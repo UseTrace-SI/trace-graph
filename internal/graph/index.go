@@ -27,15 +27,27 @@ type indexWriter struct {
 	symbolIDs       map[string]bool
 }
 
-func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
+// write is the single counted write path. Symbol metadata rows must share the
+// observation cap with symbols and relations, otherwise the stated row budget
+// is exceeded roughly threefold by scopes, content and targets alone.
+func (w *indexWriter) write(query string, args ...any) (sql.Result, error) {
 	if w.err != nil {
 		return nil, w.err
 	}
 	if w.maxRecords > 0 && w.records >= w.maxRecords {
-		w.err = fmt.Errorf("revision comparison exceeds %d observations", w.maxRecords)
+		w.err = fmt.Errorf("analysis exceeds %d observation rows", w.maxRecords)
 		return nil, w.err
 	}
 	w.records++
+	r, err := w.tx.Exec(query, args...)
+	w.err = err
+	return r, err
+}
+
+func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
+	if w.err != nil {
+		return nil, w.err
+	}
 	// Declaration identities are derived from file, name and line. Two
 	// same-name declarations on one line would silently overwrite each other
 	// (losing signature and receiver data and producing wrong edges), so reject
@@ -59,10 +71,12 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 	} else {
 		query += " ON CONFLICT(id) DO NOTHING"
 	}
-	r, err := w.tx.Exec(query, args...)
-	w.err = err
-	if err == nil && strings.Contains(query, "INTO symbols") {
-		_, w.err = w.tx.Exec("INSERT INTO symbol_scopes(symbol_id,repo,namespace) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET namespace=excluded.namespace", args[0], args[1], w.namespace)
+	r, err := w.write(query, args...)
+	if err != nil {
+		return r, err
+	}
+	if strings.Contains(query, "INTO symbols") {
+		_, w.err = w.write("INSERT INTO symbol_scopes(symbol_id,repo,namespace) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET namespace=excluded.namespace", args[0], args[1], w.namespace)
 	}
 	return r, w.err
 }
@@ -71,7 +85,7 @@ func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
 	if w.err != nil {
 		return
 	}
-	_, w.err = w.tx.Exec("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
+	_, _ = w.write("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
 }
 
 func filepathExt(path string) string { return filepath.Ext(path) }

@@ -20,7 +20,7 @@ func (w *indexWriter) call(repo, rel, fromID, fromName, toName string, line, col
 	if _, err := w.Exec("INSERT INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)", id, repo, fromName, toName, "call", rel, line); err != nil {
 		return
 	}
-	_, w.err = w.tx.Exec("INSERT INTO relation_targets(relation_id,from_id,namespace,hint) VALUES(?,?,?,?) ON CONFLICT(relation_id) DO NOTHING", scopedID(repo, id), scopedID(repo, fromID), w.namespace, hint)
+	_, _ = w.write("INSERT INTO relation_targets(relation_id,from_id,namespace,hint) VALUES(?,?,?,?) ON CONFLICT(relation_id) DO NOTHING", scopedID(repo, id), scopedID(repo, fromID), w.namespace, hint)
 }
 
 // Resolve unique package functions and explicitly declared local receiver
