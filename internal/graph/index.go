@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -90,6 +91,20 @@ func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
 
 func filepathExt(path string) string { return filepath.Ext(path) }
 
+// isIndexBusy recognizes SQLite writer contention as well as a caller deadline
+// spent waiting for the immediate transaction at the start of an analysis.
+func isIndexBusy(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var sqliteError interface{ Code() int }
+	return errors.As(err, &sqliteError) && sqliteError.Code()&255 == 5 // SQLITE_BUSY
+}
+
+func indexBusyError(err error) error {
+	return fmt.Errorf("index in progress in another process (or analysis deadline exceeded); retry after it completes: %w", err)
+}
+
 // go.mod is configuration, not a source, so it is not walked as a file. Its
 // module path still changes how imports resolve. Fold its content into every
 // file's cache key so a module-only edit forces a fresh analysis.
@@ -143,6 +158,9 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
+		if isIndexBusy(err) {
+			return 0, indexBusyError(err)
+		}
 		return 0, err
 	}
 	defer tx.Rollback()
@@ -275,6 +293,9 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
+		if isIndexBusy(err) {
+			return 0, indexBusyError(err)
+		}
 		return 0, err
 	}
 	return n, nil
