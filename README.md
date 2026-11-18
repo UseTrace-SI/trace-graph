@@ -11,17 +11,30 @@ SQLite files and manual/MCP-authored Brain notes remain local. Graph snapshots
 describe the checkout when indexed, with their index timestamp.
 
 ## Commands
-- `trace-graph version`
-- `trace-graph analyze [--repo .]`
-- `trace-graph symbols`
-- `trace-graph query <term>`
-- `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--json]`
-- `trace-graph health`
-- `trace-graph snapshot [--limit 100000]`
-- `trace-graph changes --base snapshot.ndjson`
-- `trace-graph compare --base REF [--head REF] [--detect-renames]`
-- `trace-graph refresh [--repo .]` (index and return protocol-1 JSON)
-- `trace-graph context [--path FILE] [--query words]` (bounded, read-only protocol-1 JSON)
+
+Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
+`query`, `neighbors`, `impact`, `health`, `snapshot`, `changes`, `compare`,
+`def`, `cochange`, `capabilities`, `context`, `refresh`.
+
+- `trace-graph version` — print the coordinated bundle version.
+- `trace-graph analyze [--repo .]` — index the current checkout in place.
+- `trace-graph symbols` — list indexed symbols as `file:line kind name`.
+- `trace-graph query <term>` — literal-word FTS search across symbols.
+- `trace-graph neighbors <symbol-or-id>` — show definitions and direct callers.
+- `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--limit 200] [--json]` — transitive resolved-call report.
+- `trace-graph health` — index time, coverage and resolved/unresolved call counts as JSON.
+- `trace-graph snapshot [--limit 1000000]` — stream a versioned `trace.graph/v1` NDJSON snapshot.
+- `trace-graph changes --base snapshot.ndjson` — compare a complete snapshot with the current index.
+- `trace-graph compare --base REF [--head REF] [--detect-renames]` — compare two local Git commits without changing the checkout.
+- `trace-graph def <name>` — show definitions and signatures for a symbol name.
+- `trace-graph cochange [--max-count 200] [--max-pairs 100000] [--max-log-bytes 8388608]` — list source-file pairs that change together, from a bounded `git log` stream.
+- `trace-graph capabilities` — JSON description of the compiled analyzer.
+- `trace-graph context [--path FILE] [--query words] [--limit 20] [--semantic]` — bounded, read-only protocol-1 JSON; `--query` is applied as FTS MATCH even with `--path`, and `--semantic` ranks a bounded candidate set by local embeddings.
+- `trace-graph refresh [--repo .]` — index and return protocol-1 JSON.
+
+All analysis and inspection commands remain repository-scoped. `cochange` uses
+the same supported-file and exclusion policy as indexing, scans at most
+`--max-count` commits, and refuses to exceed `--max-pairs` or `--max-log-bytes`.
 
 ## Build
 `go build ./...`
@@ -51,7 +64,7 @@ Ordinary search text is interpreted as literal words, including punctuation. Con
 
 Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused.
 
-Production builds select Go 1.27.3 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26; release builds reject a different compiler. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
+Production builds select Go 1.27.4 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26; release builds reject a different compiler. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
 
 ## Analysis quality and confidence
 
