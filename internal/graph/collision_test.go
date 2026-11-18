@@ -13,7 +13,13 @@ import (
 // second declaration sharing the same file/name/line silently replaced the
 // first, losing its signature and receiver and creating incorrect edges.
 func TestAnalyzeRepoRejectsCollidingDeclarationIdentities(t *testing.T) {
-	root := t.TempDir()
+	// AnalyzeRepoContext stores the canonical repository identity. On macOS
+	// t.TempDir() lives under /var, a symlink to /private/var, so queries must
+	// use the resolved path or they silently match no rows.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	source := filepath.Join(root, "p.go")
 	valid := "package p\ntype T struct{}\ntype U struct{}\nfunc (T) Good() {}\n"
 	colliding := "package p\ntype T struct{}\ntype U struct{}\nfunc(T)Same(){};func(U)Same(){}\n"

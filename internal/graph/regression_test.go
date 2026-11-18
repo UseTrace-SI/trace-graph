@@ -10,7 +10,12 @@ import (
 )
 
 func TestRegressionIndexMutationsAndIsolation(t *testing.T) {
-	base := t.TempDir()
+	// Use the canonical path so repository-scoped assertions check real rows
+	// on macOS too (/var is a symlink to /private/var there).
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	db, err := store.Open(filepath.Join(base, "graph.db"))
 	if err != nil {
 		t.Fatal(err)

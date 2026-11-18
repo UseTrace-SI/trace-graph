@@ -15,7 +15,12 @@ import (
 // source hash. A trailing "// class marker" used to misclassify an arrow
 // function as a type.
 func TestLexicalKindIgnoresCommentEmbeddedKeywords(t *testing.T) {
-	root := t.TempDir()
+	// AnalyzeRepoContext indexes under the canonical repository path. t.TempDir()
+	// is a symlinked /var path on macOS, making repo-scoped queries fail there.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	src := "export const Foo = (x) => x // class marker\n" +
 		"export const Bar = (x) => x /* type trap */\n" +
 		"class Real {}\n" +
