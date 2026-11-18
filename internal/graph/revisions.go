@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -49,19 +50,85 @@ type RevisionStats struct {
 	paths        map[string]bool
 }
 
+// Git flags are probed once so an older Git is not handed an option it cannot
+// parse. GIT_NO_LAZY_FETCH and GIT_NO_REPLACE_OBJECTS are set on every call as
+// the environment-level fallback; --no-lazy-fetch is only added when supported.
+var gitVersionProbe struct {
+	sync.Once
+	major, minor int
+	err          error
+}
+
+// gitMeetsVersion reports whether the installed Git is at least the given
+// version. Test helpers expose it as a skip guard for version-sensitive cases.
+func gitMeetsVersion(major, minor int) bool {
+	gitVersionProbe.Do(func() {
+		out, err := exec.Command("git", "--version").Output()
+		if err != nil {
+			gitVersionProbe.err = err
+			return
+		}
+		fields := strings.Fields(string(out))
+		if len(fields) < 3 {
+			gitVersionProbe.err = fmt.Errorf("could not parse %q", strings.TrimSpace(string(out)))
+			return
+		}
+		parts := strings.Split(fields[2], ".")
+		gitVersionProbe.major, err = strconv.Atoi(parts[0])
+		if err != nil {
+			gitVersionProbe.err = err
+			return
+		}
+		if len(parts) > 1 {
+			gitVersionProbe.minor, err = strconv.Atoi(parts[1])
+			if err != nil {
+				gitVersionProbe.err = err
+			}
+		}
+	})
+	if gitVersionProbe.err != nil {
+		return false
+	}
+	if gitVersionProbe.major != major {
+		return gitVersionProbe.major > major
+	}
+	return gitVersionProbe.minor >= minor
+}
+
+// revisionCmd keeps Git's diagnostics so a failed command never degrades to an
+// opaque "exit status 129" (for example when an option is unsupported).
+type revisionCmd struct {
+	*exec.Cmd
+	stderr bytes.Buffer
+}
+
+func (c *revisionCmd) failure(err error) error {
+	detail := strings.TrimSpace(c.stderr.String())
+	if detail == "" {
+		return fmt.Errorf("local Git comparison command failed (Git >=2.45 for --no-lazy-fetch support and locally available objects may be required): %w", err)
+	}
+	return fmt.Errorf("local Git comparison command failed (Git >=2.45 for --no-lazy-fetch support and locally available objects may be required): %w: %s", err, detail)
+}
+
 // The explicit flags fail closed on older Git, prohibit lazy network fetches
 // and replacement objects, and avoid index refreshes. No checkout/filter runs.
-func revisionGit(ctx context.Context, root string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", append([]string{"--no-pager", "--no-lazy-fetch", "--no-replace-objects", "--no-optional-locks", "-C", root}, args...)...)
+func revisionGit(ctx context.Context, root string, args ...string) *revisionCmd {
+	flags := []string{"--no-pager"}
+	if gitMeetsVersion(2, 45) {
+		flags = append(flags, "--no-lazy-fetch")
+	}
+	flags = append(flags, "--no-replace-objects", "--no-optional-locks", "-C", root)
+	cmd := exec.CommandContext(ctx, "git", append(flags, args...)...)
 	for _, value := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(value), "GIT_") {
 			cmd.Env = append(cmd.Env, value)
 		}
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_OPTIONAL_LOCKS=0")
-	cmd.Stderr = io.Discard
+	result := &revisionCmd{Cmd: cmd}
+	cmd.Stderr = &result.stderr
 	cmd.WaitDelay = time.Second
-	return cmd
+	return result
 }
 
 type revisionBuffer struct {
@@ -81,7 +148,7 @@ func revisionOutput(ctx context.Context, root string, limit int, args ...string)
 	cmd := revisionGit(ctx, root, args...)
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("local Git comparison command failed (Git with --no-lazy-fetch support and locally available objects is required): %w", err)
+		return nil, cmd.failure(err)
 	}
 	return out.Bytes(), nil
 }
@@ -257,7 +324,7 @@ func PrepareRevisionPair(ctx context.Context, root, base, head string) (*Revisio
 }
 
 type revisionBatch struct {
-	cmd    *exec.Cmd
+	cmd    *revisionCmd
 	input  io.WriteCloser
 	output *bufio.Reader
 	closed bool
@@ -319,7 +386,10 @@ func (b *revisionBatch) stop(success bool) error {
 	if !success {
 		_ = b.cmd.Process.Kill()
 	}
-	return b.cmd.Wait()
+	if err := b.cmd.Wait(); err != nil {
+		return b.cmd.failure(err)
+	}
+	return nil
 }
 
 // A revision can only be analyzed into an ephemeral in-memory index. This

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -24,28 +25,44 @@ type indexWriter struct {
 	moduleOverride  *string
 	maxRecords      int
 	records         int
-	revisionSymbols map[string]bool
+	symbolIDs       map[string]bool
+}
+
+// write is the single counted write path. Symbol metadata rows must share the
+// observation cap with symbols and relations, otherwise the stated row budget
+// is exceeded roughly threefold by scopes, content and targets alone.
+func (w *indexWriter) write(query string, args ...any) (sql.Result, error) {
+	if w.err != nil {
+		return nil, w.err
+	}
+	if w.maxRecords > 0 && w.records >= w.maxRecords {
+		w.err = fmt.Errorf("analysis exceeds %d observation rows", w.maxRecords)
+		return nil, w.err
+	}
+	w.records++
+	r, err := w.tx.Exec(query, args...)
+	w.err = err
+	return r, err
 }
 
 func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 	if w.err != nil {
 		return nil, w.err
 	}
-	if w.maxRecords > 0 && w.records >= w.maxRecords {
-		w.err = fmt.Errorf("revision comparison exceeds %d observations", w.maxRecords)
-		return nil, w.err
-	}
-	w.records++
-	if w.maxRecords > 0 && strings.Contains(query, "INTO symbols") {
-		if w.revisionSymbols == nil {
-			w.revisionSymbols = map[string]bool{}
+	// Declaration identities are derived from file, name and line. Two
+	// same-name declarations on one line would silently overwrite each other
+	// (losing signature and receiver data and producing wrong edges), so reject
+	// collisions in every mode, not just revision comparisons.
+	if strings.Contains(query, "INTO symbols") {
+		if w.symbolIDs == nil {
+			w.symbolIDs = map[string]bool{}
 		}
 		id := args[0].(string)
-		if w.revisionSymbols[id] {
-			w.err = fmt.Errorf("revision contains colliding declaration identities; separate same-name declarations onto different lines")
+		if w.symbolIDs[id] {
+			w.err = fmt.Errorf("repository contains colliding declaration identities; separate same-name declarations onto different lines")
 			return nil, w.err
 		}
-		w.revisionSymbols[id] = true
+		w.symbolIDs[id] = true
 	}
 	// Symbol and relation IDs must be unique across repositories in one DB.
 	args[0] = fmt.Sprintf("%x:%s", sha256.Sum256([]byte(args[1].(string))), args[0])
@@ -55,10 +72,12 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 	} else {
 		query += " ON CONFLICT(id) DO NOTHING"
 	}
-	r, err := w.tx.Exec(query, args...)
-	w.err = err
-	if err == nil && strings.Contains(query, "INTO symbols") {
-		_, w.err = w.tx.Exec("INSERT INTO symbol_scopes(symbol_id,repo,namespace) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET namespace=excluded.namespace", args[0], args[1], w.namespace)
+	r, err := w.write(query, args...)
+	if err != nil {
+		return r, err
+	}
+	if strings.Contains(query, "INTO symbols") {
+		_, w.err = w.write("INSERT INTO symbol_scopes(symbol_id,repo,namespace) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET namespace=excluded.namespace", args[0], args[1], w.namespace)
 	}
 	return r, w.err
 }
@@ -67,10 +86,47 @@ func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
 	if w.err != nil {
 		return
 	}
-	_, w.err = w.tx.Exec("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
+	_, _ = w.write("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
 }
 
 func filepathExt(path string) string { return filepath.Ext(path) }
+
+// isIndexBusy recognizes SQLite writer contention as well as a caller deadline
+// spent waiting for the immediate transaction at the start of an analysis.
+func isIndexBusy(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var sqliteError interface{ Code() int }
+	return errors.As(err, &sqliteError) && sqliteError.Code()&255 == 5 // SQLITE_BUSY
+}
+
+func indexBusyError(err error) error {
+	return fmt.Errorf("index in progress in another process (or analysis deadline exceeded); retry after it completes: %w", err)
+}
+
+// go.mod is configuration, not a source, so it is not walked as a file. Its
+// module path still changes how imports resolve. Fold its content into every
+// file's cache key so a module-only edit forces a fresh analysis.
+func goModDigest(root string) (string, error) {
+	f, err := os.Open(filepath.Join(root, "go.mod"))
+	if os.IsNotExist(err) {
+		return "absent", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	const limit = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > limit {
+		return "", fmt.Errorf("go.mod exceeds 1 MiB")
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
 
 // AnalyzeRepo commits a complete repository generation atomically. Content
 // hashes catch edits even when size and filesystem timestamps are unchanged.
@@ -96,8 +152,15 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	if !info.IsDir() {
 		return 0, fmt.Errorf("repository is not a directory: %s", root)
 	}
+	modDigest, err := goModDigest(root)
+	if err != nil {
+		return 0, fmt.Errorf("reading go.mod: %w", err)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
+		if isIndexBusy(err) {
+			return 0, indexBusyError(err)
+		}
 		return 0, err
 	}
 	defer tx.Rollback()
@@ -143,7 +206,7 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if totalBytes > 512*1024*1024 {
 			return fmt.Errorf("repository sources exceed 512 MiB")
 		}
-		digest := fmt.Sprintf("%s:%x", analyzerVersion, sha256.Sum256(src))
+		digest := fmt.Sprintf("%s:%s:%x", analyzerVersion, modDigest, sha256.Sum256(src))
 		var old string
 		err = tx.QueryRowContext(ctx, "SELECT digest FROM file_cache_v2 WHERE repo=? AND path=?", root, rel).Scan(&old)
 		if err != nil && err != sql.ErrNoRows {
@@ -230,6 +293,9 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
+		if isIndexBusy(err) {
+			return 0, indexBusyError(err)
+		}
 		return 0, err
 	}
 	return n, nil

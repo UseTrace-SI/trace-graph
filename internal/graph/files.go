@@ -11,6 +11,12 @@ import (
 	"strings"
 )
 
+// InspectableSource applies the same file policy as indexing. Read-only
+// inspection commands use it so derived context never mentions excluded paths.
+func InspectableSource(rel string) bool {
+	return supportedFile(strings.ToLower(filepath.Ext(rel))) && !excludedSource(strings.ToLower(rel))
+}
+
 func excludedSource(rel string) bool {
 	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
 		switch part {
