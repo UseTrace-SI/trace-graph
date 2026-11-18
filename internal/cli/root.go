@@ -2,13 +2,19 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/UseTrace-SI/trace-graph/internal/graph"
 	"github.com/UseTrace-SI/trace-graph/internal/store"
@@ -226,22 +232,46 @@ func capabilitiesCmd() *cobra.Command {
 }
 
 func cochangeCmd() *cobra.Command {
-	return &cobra.Command{Use: "cochange", RunE: func(cmd *cobra.Command, args []string) error {
-		// Use git log to find files changed together
-		gitcmd := exec.Command("git", "-C", repoPath, "log", "--name-only", "--pretty=format:")
-		outb, err := gitcmd.Output()
-		out := string(outb)
+	var maxCount, maxPairs, maxBytes int
+	cmd := &cobra.Command{Use: "cochange", Short: "Report files that change together", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		if maxCount < 1 || maxCount > 1000 || maxPairs < 1 || maxPairs > 100000 || maxBytes < 1024 || maxBytes > 64<<20 {
+			return fmt.Errorf("max-count must be 1-1000, max-pairs 1-100000 and max-log-bytes 1024-67108864")
+		}
+		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+		defer cancel()
+		// Stream a bounded log instead of loading all history into memory.
+		gitcmd := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
+		pipe, err := gitcmd.StdoutPipe()
 		if err != nil {
 			return err
 		}
-		// count co-occurrences
+		var stderr bytes.Buffer
+		gitcmd.Stderr = &stderr
+		if err := gitcmd.Start(); err != nil {
+			return err
+		}
+		waited := false
+		defer func() {
+			if !waited {
+				_ = gitcmd.Process.Kill()
+				_ = gitcmd.Wait()
+			}
+		}()
+		const maxFilesPerCommit = 500
 		type pair struct{ a, b string }
 		counts := map[pair]int{}
-		scanner := bufio.NewScanner(strings.NewReader(out))
+		limited := &io.LimitedReader{R: pipe, N: int64(maxBytes) + 1}
+		scanner := bufio.NewScanner(limited)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		var current []string
+		overBudget := false
 		flush := func() {
-			for i := 0; i < len(current); i++ {
+			for i := 0; i < len(current) && !overBudget; i++ {
 				for j := i + 1; j < len(current); j++ {
+					if len(counts) >= maxPairs {
+						overBudget = true
+						break
+					}
 					a, b := current[i], current[j]
 					if a > b {
 						a, b = b, a
@@ -257,29 +287,46 @@ func cochangeCmd() *cobra.Command {
 				flush()
 				continue
 			}
+			if !graph.InspectableSource(line) || len(current) >= maxFilesPerCommit {
+				continue
+			}
 			current = append(current, line)
 		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("reading git log: %w", err)
+		}
+		if limited.N <= 0 {
+			return fmt.Errorf("cochange log exceeds %d bytes", maxBytes)
+		}
 		flush()
-		// print top
+		waitErr := gitcmd.Wait()
+		waited = true
+		if waitErr != nil {
+			return fmt.Errorf("listing co-change history: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+		}
+		if overBudget {
+			return fmt.Errorf("cochange exceeds %d unique file pairs", maxPairs)
+		}
+
 		type entry struct {
 			a, b string
 			n    int
 		}
-		var entries []entry
+		entries := make([]entry, 0, len(counts))
 		for p, n := range counts {
 			if n >= 2 {
 				entries = append(entries, entry{p.a, p.b, n})
 			}
 		}
-		// sort by n desc
-		// simple bubble
-		for i := 0; i < len(entries); i++ {
-			for j := i + 1; j < len(entries); j++ {
-				if entries[j].n > entries[i].n {
-					entries[i], entries[j] = entries[j], entries[i]
-				}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].n != entries[j].n {
+				return entries[i].n > entries[j].n
 			}
-		}
+			if entries[i].a != entries[j].a {
+				return entries[i].a < entries[j].a
+			}
+			return entries[i].b < entries[j].b
+		})
 		for i, e := range entries {
 			if i >= 20 {
 				break
@@ -291,4 +338,8 @@ func cochangeCmd() *cobra.Command {
 		}
 		return nil
 	}}
+	cmd.Flags().IntVar(&maxCount, "max-count", 200, "maximum commits to scan (1-1000)")
+	cmd.Flags().IntVar(&maxPairs, "max-pairs", 100000, "maximum unique file pairs (1-100000)")
+	cmd.Flags().IntVar(&maxBytes, "max-log-bytes", 8<<20, "maximum git log bytes (1024-67108864)")
+	return cmd
 }
