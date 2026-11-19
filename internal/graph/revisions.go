@@ -105,9 +105,9 @@ type revisionCmd struct {
 func (c *revisionCmd) failure(err error) error {
 	detail := strings.TrimSpace(c.stderr.String())
 	if detail == "" {
-		return fmt.Errorf("local Git comparison command failed (Git >=2.45 for --no-lazy-fetch support and locally available objects may be required): %w", err)
+		return fmt.Errorf("local Git comparison command failed (locally available Git objects and a supported Git version may be required): %w", err)
 	}
-	return fmt.Errorf("local Git comparison command failed (Git >=2.45 for --no-lazy-fetch support and locally available objects may be required): %w: %s", err, detail)
+	return fmt.Errorf("local Git comparison command failed (locally available Git objects and a supported Git version may be required): %w: %s", err, detail)
 }
 
 // The explicit flags fail closed on older Git, prohibit lazy network fetches

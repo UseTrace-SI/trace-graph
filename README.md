@@ -116,8 +116,9 @@ Git objects in memory, leaving the checkout, Git index, refs and persistent Grap
 database untouched. Through the coordinated CLI use
 `trace --repo /path/to/repo graph compare --base main --head HEAD`.
 Select the working-tree root with `--repo`; subdirectories and bare repositories
-are refused. Git must support `--no-lazy-fetch`; missing objects fail without a
-fetch. Object replacements, checkout filters, symlinks and submodules are skipped.
+are refused. Git 2.45+ uses `--no-lazy-fetch`; older releases use the
+`GIT_NO_LAZY_FETCH` environment fallback. Missing objects fail without a fetch.
+Object replacements, checkout filters, symlinks and submodules are skipped.
 
 The JSON report records exact commit IDs, analyzer limits, exclusion-policy hash,
 source counts and symbol changes. It returns source/signature hashes and symbol

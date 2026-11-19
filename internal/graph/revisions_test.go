@@ -300,3 +300,20 @@ func TestRevisionMissingPromisorObjectNeverRunsFetchHelper(t *testing.T) {
 		t.Fatal("comparison executed a remote helper", err)
 	}
 }
+
+// The revision code supports Git < 2.45 by probing the version and relying on
+// GIT_NO_LAZY_FETCH when --no-lazy-fetch is unavailable. Keep the documented
+// requirement in sync with that behavior.
+func TestREADMEGitVersionMatchesRevisionCode(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "Git must support `--no-lazy-fetch`") {
+		t.Fatal("README claims --no-lazy-fetch is required; revisions.go supports older Git via GIT_NO_LAZY_FETCH")
+	}
+	if !strings.Contains(text, "GIT_NO_LAZY_FETCH") {
+		t.Fatal("README does not document the older-Git fallback")
+	}
+}
