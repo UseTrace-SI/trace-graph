@@ -105,9 +105,9 @@ type revisionCmd struct {
 func (c *revisionCmd) failure(err error) error {
 	detail := strings.TrimSpace(c.stderr.String())
 	if detail == "" {
-		return fmt.Errorf("local Git comparison command failed (Git >=2.45 for --no-lazy-fetch support and locally available objects may be required): %w", err)
+		return fmt.Errorf("local Git comparison command failed (locally available Git objects and a supported Git version may be required): %w", err)
 	}
-	return fmt.Errorf("local Git comparison command failed (Git >=2.45 for --no-lazy-fetch support and locally available objects may be required): %w: %s", err, detail)
+	return fmt.Errorf("local Git comparison command failed (locally available Git objects and a supported Git version may be required): %w: %s", err, detail)
 }
 
 // The explicit flags fail closed on older Git, prohibit lazy network fetches
@@ -227,7 +227,12 @@ func listRevision(ctx context.Context, root, commit string) (revision, error) {
 		}
 		fields := strings.Fields(string(parts[0]))
 		file := string(parts[1])
-		if len(fields) != 4 || !objectID(fields[2]) || !utf8.ValidString(file) || len(file) > 4096 || file == "." || path.Clean(file) != file || path.IsAbs(file) || strings.HasPrefix(file, "../") || strings.ContainsAny(file, "\\") || strings.ContainsFunc(file, unicode.IsControl) || seen[file] {
+		// A backslash is a legal filename byte on Unix and Git emits it raw
+		// under -z, so it must not be rejected here. The remaining checks still
+		// block the genuine traversal/control hazards: absolute paths, ".."
+		// escapes (via path.Clean and the explicit prefix), NUL and other
+		// control bytes, invalid UTF-8, oversized and duplicate paths.
+		if len(fields) != 4 || !objectID(fields[2]) || !utf8.ValidString(file) || len(file) > 4096 || file == "." || path.Clean(file) != file || path.IsAbs(file) || strings.HasPrefix(file, "../") || strings.ContainsFunc(file, unicode.IsControl) || seen[file] {
 			return result, fmt.Errorf("invalid, duplicate or oversized Git tree path")
 		}
 		seen[file] = true

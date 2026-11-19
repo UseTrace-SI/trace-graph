@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -93,6 +95,75 @@ func TestTransitiveImpactIdentityCyclesLimitsAndIsolation(t *testing.T) {
 	}
 	if _, err = run(); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("guessed ambiguous target: %v", err)
+	}
+}
+
+// A deep graph used to hit the hard two-second deadline inside BFS and fail
+// outright. The walk must degrade to a best-effort report when its budget is
+// exhausted instead of returning an error.
+func TestTransitiveImpactDeadlineDegradesOnDeepGraph(t *testing.T) {
+	repo, _ := filepath.EvalSymlinks(t.TempDir())
+	path := filepath.Join(t.TempDir(), "graph.db")
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec("INSERT INTO repo_state VALUES(?,123)", repo); err != nil {
+		t.Fatal(err)
+	}
+	const nodes = 60
+	name := func(i int) string { return fmt.Sprintf("S%02d", i) }
+	id := func(i int) string { return repo + name(i) }
+	for i := 0; i < nodes; i++ {
+		if _, err = db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)", id(i), repo, "chain.go", name(i), "func", i+1, "func S()"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < nodes-1; i++ {
+		rid := fmt.Sprintf("%srel%02d", repo, i)
+		if _, err = db.Exec("INSERT INTO relations VALUES(?,?,?,?,?,?,?)", rid, repo, name(i), name(i+1), "call", "chain.go", i+1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec("INSERT INTO relation_targets VALUES(?,?,?,?,?,?)", rid, id(i), id(i+1), "p", "identifier", "resolved"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	rdb, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rdb.Close()
+	tx, err := rdb.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var root codeSymbol
+	if err := tx.QueryRow("SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE repo=? AND name=?", repo, name(0)).Scan(&root.ID, &root.File, &root.Name, &root.Kind, &root.Line, &root.Signature); err != nil {
+		t.Fatal(err)
+	}
+
+	// With budget to spare, the deep chain is bounded by depth, not by time.
+	healthy := impactReport{Symbol: root, Repo: repo, Direction: "callees", Nodes: []impactNode{}}
+	if err := expandImpact(context.Background(), tx, &healthy, repo, "callees", 20, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if healthy.DeadlineExceeded || !healthy.Truncated || len(healthy.Nodes) != 20 {
+		t.Fatalf("deep chain was not bounded by depth: %+v", healthy)
+	}
+
+	// With the budget already exhausted, the same graph must return a
+	// best-effort report carrying the deadline flag rather than an error.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired := impactReport{Symbol: root, Repo: repo, Direction: "callees", Nodes: []impactNode{}}
+	if err := expandImpact(ctx, tx, &expired, repo, "callees", 20, 1000); err != nil {
+		t.Fatalf("exhausted budget caused a hard failure: %v", err)
+	}
+	if !expired.DeadlineExceeded || !expired.Truncated {
+		t.Fatalf("exhausted budget was not reported: %+v", expired)
 	}
 }
 

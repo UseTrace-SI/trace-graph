@@ -231,6 +231,25 @@ func capabilitiesCmd() *cobra.Command {
 	}}
 }
 
+// maxFilesForPairBudget returns the largest number of files whose pairwise
+// combinations fit inside the unique-pair budget, never exceeding the scan
+// safety cap. Without this, a single large commit (for example an initial
+// import) can exhaust the default --max-pairs budget and fail cochange even
+// though the user never exceeded the documented pair limit.
+func maxFilesForPairBudget(maxPairs int) int {
+	const scanCap = 500
+	lo, hi := 0, scanCap
+	for lo < hi {
+		mid := (lo + hi + 1) / 2
+		if int64(mid)*(int64(mid)-1)/2 <= int64(maxPairs) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	return lo
+}
+
 func cochangeCmd() *cobra.Command {
 	var maxCount, maxPairs, maxBytes int
 	cmd := &cobra.Command{Use: "cochange", Short: "Report files that change together", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -257,7 +276,7 @@ func cochangeCmd() *cobra.Command {
 				_ = gitcmd.Wait()
 			}
 		}()
-		const maxFilesPerCommit = 500
+		maxFilesPerCommit := maxFilesForPairBudget(maxPairs)
 		type pair struct{ a, b string }
 		counts := map[pair]int{}
 		limited := &io.LimitedReader{R: pipe, N: int64(maxBytes) + 1}

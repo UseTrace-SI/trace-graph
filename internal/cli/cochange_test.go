@@ -71,3 +71,36 @@ func TestCochangeIsBoundedAndFiltered(t *testing.T) {
 		}
 	}
 }
+
+// A single large commit (for example an initial import) must not make the
+// default cochange invocation fail just because its per-commit file cap is
+// larger than the pair budget allows. 460 files produce 105570 unique pairs,
+// above the default --max-pairs of 100000.
+func TestCochangeLargeCommitWithinDefaultPairBudget(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	const files = 460
+	for i := 0; i < files; i++ {
+		path := filepath.Join(root, fmt.Sprintf("src/f%03d.go", i))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("package p\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compareTestGit(t, root, "add", "-A")
+	compareTestGit(t, root, "commit", "-qm", "large import")
+
+	var out bytes.Buffer
+	cmd := newRoot()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--repo", root, "cochange"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("default cochange failed on a large commit: %v\n%s", err, &out)
+	}
+}

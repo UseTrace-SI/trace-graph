@@ -49,6 +49,23 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 	if w.err != nil {
 		return nil, w.err
 	}
+	// Every caller supplies (id, repo, ...). Assert the shape explicitly so a
+	// future query with a different argument order fails with a useful error
+	// instead of panicking or silently formatting a malformed scoped ID.
+	if len(args) < 2 {
+		w.err = fmt.Errorf("indexWriter.Exec: expected at least (id, repo) string arguments, got %d", len(args))
+		return nil, w.err
+	}
+	id, ok := args[0].(string)
+	if !ok {
+		w.err = fmt.Errorf("indexWriter.Exec: argument 0 (id) must be a string, got %T", args[0])
+		return nil, w.err
+	}
+	repo, ok := args[1].(string)
+	if !ok {
+		w.err = fmt.Errorf("indexWriter.Exec: argument 1 (repo) must be a string, got %T", args[1])
+		return nil, w.err
+	}
 	// Declaration identities are derived from file, name and line. Two
 	// same-name declarations on one line would silently overwrite each other
 	// (losing signature and receiver data and producing wrong edges), so reject
@@ -57,7 +74,6 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 		if w.symbolIDs == nil {
 			w.symbolIDs = map[string]bool{}
 		}
-		id := args[0].(string)
 		if w.symbolIDs[id] {
 			w.err = fmt.Errorf("repository contains colliding declaration identities; separate same-name declarations onto different lines")
 			return nil, w.err
@@ -65,7 +81,7 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 		w.symbolIDs[id] = true
 	}
 	// Symbol and relation IDs must be unique across repositories in one DB.
-	args[0] = fmt.Sprintf("%x:%s", sha256.Sum256([]byte(args[1].(string))), args[0])
+	args[0] = scopedID(repo, id)
 	query = strings.Replace(query, "INSERT OR REPLACE", "INSERT", 1)
 	if strings.Contains(query, "INTO symbols") {
 		query += " ON CONFLICT(id) DO UPDATE SET signature=excluded.signature,kind=excluded.kind"

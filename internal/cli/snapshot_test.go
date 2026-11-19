@@ -3,7 +3,9 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -60,5 +62,36 @@ func TestGraphSnapshotIsScopedVersionedAndDetectablyComplete(t *testing.T) {
 	var health map[string]any
 	if err := json.Unmarshal(run(repo, "health"), &health); err != nil || health["symbols"] != float64(2) || health["calls"] != float64(1) {
 		t.Fatalf("health: %+v %v", health, err)
+	}
+}
+
+// snapshot --limit accepts up to 1000000 records, so the changes consumer must
+// be able to read a complete snapshot larger than the old 100000-symbol cap.
+func TestReadSnapshotAcceptsMoreThanHundredThousandSymbols(t *testing.T) {
+	const repoPath = "/regression/repo"
+	path := filepath.Join(t.TempDir(), "large.ndjson")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := bufio.NewWriter(f)
+	fmt.Fprintf(w, "{\"type\":\"metadata\",\"format\":\"trace.graph/v1\",\"repo\":%q,\"analysis\":{\"analyzer\":\"test-analyzer\"}}\n", repoPath)
+	const count = 100001
+	for i := 0; i < count; i++ {
+		fmt.Fprintf(w, "{\"type\":\"symbol\",\"id\":\"id%d\",\"file\":\"f.go\",\"name\":\"N%d\",\"kind\":\"func\"}\n", i, i)
+	}
+	fmt.Fprintf(w, "{\"type\":\"complete\",\"records\":%d,\"truncated\":false}\n", count)
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	symbols, analyzer, err := readSnapshot(context.Background(), path, repoPath)
+	if err != nil {
+		t.Fatalf("complete large snapshot rejected: %v", err)
+	}
+	if analyzer != "test-analyzer" || len(symbols) != count {
+		t.Fatalf("unexpected snapshot: analyzer=%q symbols=%d", analyzer, len(symbols))
 	}
 }

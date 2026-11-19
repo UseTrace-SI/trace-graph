@@ -17,14 +17,19 @@ type snapshotSymbol struct {
 	EndLine    int    `json:"end_line,omitempty"`
 }
 
+// maxSnapshotRecords is the shared bound for snapshot producers and consumers.
+// snapshot --limit and the changes reader must agree, otherwise a complete
+// snapshot produced by this tool cannot be loaded for comparison.
+const maxSnapshotRecords = 1_000_000
+
 // Versioned NDJSON export: one consistent read transaction, bounded rows and
 // signatures, no source-file reads. A footer distinguishes a finished export
 // from interrupted output and explicitly reports a capped export.
 func snapshotCmd() *cobra.Command {
 	var limit int
 	cmd := &cobra.Command{Use: "snapshot", Short: "Stream a versioned NDJSON graph snapshot", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if limit < 1 || limit > 1_000_000 {
-			return fmt.Errorf("limit must be 1–1000000")
+		if limit < 1 || limit > maxSnapshotRecords {
+			return fmt.Errorf("limit must be 1–%d", maxSnapshotRecords)
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 		defer cancel()

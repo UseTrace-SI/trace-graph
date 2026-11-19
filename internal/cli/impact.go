@@ -38,15 +38,16 @@ type impactNode struct {
 	Via      string `json:"via"`
 }
 type impactReport struct {
-	Protocol  int            `json:"protocol"`
-	Repo      string         `json:"repo"`
-	IndexedAt int64          `json:"indexed_at"`
-	Symbol    codeSymbol     `json:"symbol"`
-	Direction string         `json:"direction"`
-	Depth     int            `json:"depth"`
-	Nodes     []impactNode   `json:"nodes"`
-	Truncated bool           `json:"truncated"`
-	Analysis  graph.Analysis `json:"analysis"`
+	Protocol         int            `json:"protocol"`
+	Repo             string         `json:"repo"`
+	IndexedAt        int64          `json:"indexed_at"`
+	Symbol           codeSymbol     `json:"symbol"`
+	Direction        string         `json:"direction"`
+	Depth            int            `json:"depth"`
+	Nodes            []impactNode   `json:"nodes"`
+	Truncated        bool           `json:"truncated"`
+	DeadlineExceeded bool           `json:"deadline_exceeded"`
+	Analysis         graph.Analysis `json:"analysis"`
 }
 
 func transitiveImpactCmd() *cobra.Command {
@@ -104,53 +105,8 @@ func transitiveImpactCmd() *cobra.Command {
 			return fmt.Errorf("ambiguous symbol; use the symbol ID from context")
 		}
 		out.Symbol = roots[0]
-		queue := []impactNode{{codeSymbol: out.Symbol}}
-		visited := map[string]bool{out.Symbol.ID: true}
-		for cursor := 0; cursor < len(queue); cursor++ {
-			current := queue[cursor]
-			join, filter := "s.id=t.from_id", "t.to_id=?"
-			params := []any{repoPath, repoPath, current.ID}
-			if direction == "callees" {
-				join, filter = "s.id=t.to_id", "t.from_id=?"
-			}
-			if direction == "both" {
-				join, filter = "s.id=CASE WHEN t.from_id=? THEN t.to_id ELSE t.from_id END", "(t.to_id=? OR t.from_id=?)"
-				params = []any{current.ID, repoPath, repoPath, current.ID, current.ID}
-			}
-			params = append(params, limit+1)
-			q := `SELECT DISTINCT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048) FROM relation_targets t JOIN relations r ON r.id=t.relation_id JOIN symbols s ON ` + join + ` WHERE r.repo=? AND s.repo=? AND t.to_id IS NOT NULL AND ` + filter + ` ORDER BY s.file,s.line,s.id LIMIT ?`
-			rows, err := tx.QueryContext(ctx, q, params...)
-			if err != nil {
-				return err
-			}
-			count := 0
-			for rows.Next() {
-				count++
-				var s codeSymbol
-				if err := rows.Scan(&s.ID, &s.File, &s.Name, &s.Kind, &s.Line, &s.Signature); err != nil {
-					rows.Close()
-					return err
-				}
-				if visited[s.ID] {
-					continue
-				}
-				if current.Distance >= depth || len(out.Nodes) >= limit {
-					out.Truncated = true
-					continue
-				}
-				visited[s.ID] = true
-				n := impactNode{codeSymbol: s, Distance: current.Distance + 1, Via: current.ID}
-				out.Nodes = append(out.Nodes, n)
-				queue = append(queue, n)
-			}
-			err = rows.Err()
-			rows.Close()
-			if err != nil {
-				return err
-			}
-			if count > limit {
-				out.Truncated = true
-			}
+		if err := expandImpact(ctx, tx, &out, repoPath, direction, depth, limit); err != nil {
+			return err
 		}
 		if jsonOutput {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
@@ -159,7 +115,9 @@ func transitiveImpactCmd() *cobra.Command {
 		for _, n := range out.Nodes {
 			fmt.Fprintf(cmd.OutOrStdout(), "  depth %d  %s:%d  %s [%s]\n", n.Distance, n.File, n.Line, n.Name, n.Kind)
 		}
-		if out.Truncated {
+		if out.DeadlineExceeded {
+			fmt.Fprintln(cmd.OutOrStdout(), "Partial result: two-second deadline reached; best-effort result.")
+		} else if out.Truncated {
 			fmt.Fprintln(cmd.OutOrStdout(), "Partial result: depth or result limit reached.")
 		}
 		return nil
@@ -169,6 +127,82 @@ func transitiveImpactCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 200, "maximum returned symbols (1–1000)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit a protocol-1 JSON report")
 	return cmd
+}
+
+// expandImpact walks resolved edges breadth-first from out.Symbol. When ctx
+// expires mid-walk it stops and marks the report best-effort instead of
+// failing, so a deep graph cannot break the command's responsiveness budget.
+func expandImpact(ctx context.Context, tx *sql.Tx, out *impactReport, repo, direction string, depth, limit int) error {
+	deadline := func() {
+		out.Truncated = true
+		out.DeadlineExceeded = true
+	}
+	queue := []impactNode{{codeSymbol: out.Symbol}}
+	visited := map[string]bool{out.Symbol.ID: true}
+	for cursor := 0; cursor < len(queue); cursor++ {
+		if ctx.Err() != nil {
+			deadline()
+			return nil
+		}
+		current := queue[cursor]
+		join, filter := "s.id=t.from_id", "t.to_id=?"
+		params := []any{repo, repo, current.ID}
+		if direction == "callees" {
+			join, filter = "s.id=t.to_id", "t.from_id=?"
+		}
+		if direction == "both" {
+			join, filter = "s.id=CASE WHEN t.from_id=? THEN t.to_id ELSE t.from_id END", "(t.to_id=? OR t.from_id=?)"
+			params = []any{current.ID, repo, repo, current.ID, current.ID}
+		}
+		params = append(params, limit+1)
+		q := `SELECT DISTINCT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048) FROM relation_targets t JOIN relations r ON r.id=t.relation_id JOIN symbols s ON ` + join + ` WHERE r.repo=? AND s.repo=? AND t.to_id IS NOT NULL AND ` + filter + ` ORDER BY s.file,s.line,s.id LIMIT ?`
+		rows, err := tx.QueryContext(ctx, q, params...)
+		if err != nil {
+			if ctx.Err() != nil {
+				deadline()
+				return nil
+			}
+			return err
+		}
+		count := 0
+		for rows.Next() {
+			if ctx.Err() != nil {
+				rows.Close()
+				deadline()
+				return nil
+			}
+			count++
+			var s codeSymbol
+			if err := rows.Scan(&s.ID, &s.File, &s.Name, &s.Kind, &s.Line, &s.Signature); err != nil {
+				rows.Close()
+				return err
+			}
+			if visited[s.ID] {
+				continue
+			}
+			if current.Distance >= depth || len(out.Nodes) >= limit {
+				out.Truncated = true
+				continue
+			}
+			visited[s.ID] = true
+			n := impactNode{codeSymbol: s, Distance: current.Distance + 1, Via: current.ID}
+			out.Nodes = append(out.Nodes, n)
+			queue = append(queue, n)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			if ctx.Err() != nil {
+				deadline()
+				return nil
+			}
+			return err
+		}
+		if count > limit {
+			out.Truncated = true
+		}
+	}
+	return nil
 }
 
 func healthCmd() *cobra.Command {
