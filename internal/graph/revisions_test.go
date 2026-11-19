@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -59,6 +60,34 @@ func revisionTestRepo(t *testing.T) string {
 func TestGitVersionAtLeastParsesInstalledVersion(t *testing.T) {
 	if !gitMeetsVersion(1, 0) || gitMeetsVersion(99, 0) {
 		t.Fatal("implausible Git version probe")
+	}
+}
+
+// Backslash is a legal filename byte on Linux/macOS and Git emits it raw under
+// ls-tree -z. Rejecting it made every repository containing such a file
+// impossible to compare, even though it is never a path separator on Unix.
+func TestListRevisionAllowsBackslashInGitPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("backslash is a path separator on Windows")
+	}
+	ctx := context.Background()
+	root := revisionTestRepo(t)
+	const weird = `weird\name.go`
+	revisionTestWrite(t, root, "normal.go", "package p\nfunc Normal(){}\n")
+	revisionTestWrite(t, root, weird, "package p\nfunc Weird(){}\n")
+	commit := revisionTestCommit(t, root)
+	rev, err := listRevision(ctx, root, commit)
+	if err != nil {
+		t.Fatalf("backslash filename rejected: %v", err)
+	}
+	found := false
+	for _, e := range rev.entries {
+		if e.file == weird {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("backslash filename missing from revision: %+v", rev.entries)
 	}
 }
 
