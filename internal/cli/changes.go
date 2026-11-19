@@ -53,7 +53,7 @@ func changesCmd() *cobra.Command {
 		if err := tx.QueryRowContext(ctx, "SELECT indexed_at FROM repo_state WHERE repo=?", repoPath).Scan(&indexed); err != nil {
 			return fmt.Errorf("index unavailable; run trace-graph refresh: %w", err)
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048),COALESCE(c.source_hash,''),COALESCE(c.end_line,s.line) FROM symbols s LEFT JOIN symbol_content c ON c.symbol_id=s.id WHERE s.repo=? ORDER BY s.file,s.line,s.id LIMIT 100001`, repoPath)
+		rows, err := tx.QueryContext(ctx, `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048),COALESCE(c.source_hash,''),COALESCE(c.end_line,s.line) FROM symbols s LEFT JOIN symbol_content c ON c.symbol_id=s.id WHERE s.repo=? ORDER BY s.file,s.line,s.id LIMIT ?`, repoPath, maxSnapshotRecords+1)
 		if err != nil {
 			return err
 		}
@@ -71,8 +71,8 @@ func changesCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if len(current) > 100000 {
-			return fmt.Errorf("comparison exceeds 100000 symbols")
+		if len(current) > maxSnapshotRecords {
+			return fmt.Errorf("comparison exceeds %d symbols", maxSnapshotRecords)
 		}
 		changes := compareSymbols(previous, current)
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "repo": repoPath, "indexed_at": indexed, "analysis": graph.Capabilities(), "changes": changes})
@@ -227,8 +227,8 @@ func readSnapshot(ctx context.Context, path, repo string) ([]snapshotSymbol, str
 			seen[row.ID] = true
 			symbols = append(symbols, row.snapshotSymbol)
 			records++
-			if len(symbols) > 100000 {
-				return nil, "", fmt.Errorf("snapshot exceeds 100000 symbols")
+			if len(symbols) > maxSnapshotRecords {
+				return nil, "", fmt.Errorf("snapshot exceeds %d symbols", maxSnapshotRecords)
 			}
 		case "relation":
 			records++
