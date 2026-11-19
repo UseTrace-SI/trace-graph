@@ -94,7 +94,10 @@ This upgrade invalidates the previous derived index once; run `refresh` to rebui
 `impact` walks resolved symbol identities transitively, with cycle detection,
 repository isolation, a two-second deadline, depth 1–20 and at most 1,000 returned
 symbols. Ambiguous names require an explicit ID; capped results report
-`truncated: true`. Unresolved observations are never guessed into graph edges.
+`truncated: true`. If the deadline expires mid-walk, the command returns the
+best-effort symbols gathered so far with `truncated: true` and
+`deadline_exceeded: true` rather than failing. Unresolved observations are
+never guessed into graph edges.
 `health` reports index time, file/symbol counts and resolved/unresolved call counts.
 
 `snapshot` streams versioned `trace.graph/v1` NDJSON from one read transaction,
