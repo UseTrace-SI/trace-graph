@@ -185,7 +185,7 @@ func neighborsCmd() *cobra.Command {
 		}
 		rows.Close()
 		r2, err := db.Query(`SELECT DISTINCT r.from_symbol,r.file,r.line FROM relations r LEFT JOIN relation_targets t ON t.relation_id=r.id
- WHERE r.repo=? AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line`, repoPath, repoPath, name, name, name)
+ WHERE r.repo=? AND r.kind IN ('call','dispatch') AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line`, repoPath, repoPath, name, name, name)
 		if err != nil {
 			return err
 		}

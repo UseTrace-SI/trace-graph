@@ -45,6 +45,7 @@ type impactReport struct {
 	Direction        string         `json:"direction"`
 	Depth            int            `json:"depth"`
 	Nodes            []impactNode   `json:"nodes"`
+	IncludeDispatch  bool           `json:"include_dispatch"`
 	Truncated        bool           `json:"truncated"`
 	DeadlineExceeded bool           `json:"deadline_exceeded"`
 	Analysis         graph.Analysis `json:"analysis"`
@@ -53,7 +54,7 @@ type impactReport struct {
 func transitiveImpactCmd() *cobra.Command {
 	var direction string
 	var depth, limit int
-	var jsonOutput bool
+	var jsonOutput, includeDispatch bool
 	cmd := &cobra.Command{Use: "impact <symbol-or-id>", Short: "Trace resolved callers or callees transitively", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if direction != "callers" && direction != "callees" && direction != "both" {
 			return fmt.Errorf("direction must be callers, callees or both")
@@ -76,7 +77,7 @@ func transitiveImpactCmd() *cobra.Command {
 			return err
 		}
 		defer tx.Rollback()
-		out := impactReport{Protocol: 1, Repo: repoPath, Direction: direction, Depth: depth, Nodes: []impactNode{}, Analysis: graph.Capabilities()}
+		out := impactReport{Protocol: 1, Repo: repoPath, Direction: direction, Depth: depth, IncludeDispatch: includeDispatch, Nodes: []impactNode{}, Analysis: graph.Capabilities()}
 		if err := tx.QueryRowContext(ctx, "SELECT indexed_at FROM repo_state WHERE repo=?", repoPath).Scan(&out.IndexedAt); err != nil {
 			return fmt.Errorf("index unavailable; run trace-graph refresh: %w", err)
 		}
@@ -126,6 +127,7 @@ func transitiveImpactCmd() *cobra.Command {
 	cmd.Flags().IntVar(&depth, "depth", 3, "maximum graph distance (1–20)")
 	cmd.Flags().IntVar(&limit, "limit", 200, "maximum returned symbols (1–1000)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit a protocol-1 JSON report")
+	cmd.Flags().BoolVar(&includeDispatch, "include-dispatch", false, "also follow interface dispatch edges to possible implementations")
 	return cmd
 }
 
@@ -155,7 +157,11 @@ func expandImpact(ctx context.Context, tx *sql.Tx, out *impactReport, repo, dire
 			params = []any{current.ID, repo, repo, current.ID, current.ID}
 		}
 		params = append(params, limit+1)
-		q := `SELECT DISTINCT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048) FROM relation_targets t JOIN relations r ON r.id=t.relation_id JOIN symbols s ON ` + join + ` WHERE r.repo=? AND s.repo=? AND t.to_id IS NOT NULL AND ` + filter + ` ORDER BY s.file,s.line,s.id LIMIT ?`
+		kinds := "r.kind='call'"
+		if out.IncludeDispatch {
+			kinds = "r.kind IN ('call','dispatch')"
+		}
+		q := `SELECT DISTINCT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048) FROM relation_targets t JOIN relations r ON r.id=t.relation_id JOIN symbols s ON ` + join + ` WHERE r.repo=? AND s.repo=? AND t.to_id IS NOT NULL AND ` + kinds + ` AND ` + filter + ` ORDER BY s.file,s.line,s.id LIMIT ?`
 		rows, err := tx.QueryContext(ctx, q, params...)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -205,6 +211,24 @@ func expandImpact(ctx context.Context, tx *sql.Tx, out *impactReport, repo, dire
 	return nil
 }
 
+func countGroups(ctx context.Context, db *sql.DB, query string, args ...any) (map[string]int, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var key string
+		var n int
+		if err := rows.Scan(&key, &n); err != nil {
+			return nil, err
+		}
+		counts[key] = n
+	}
+	return counts, rows.Err()
+}
+
 func healthCmd() *cobra.Command {
 	return &cobra.Command{Use: "health", Short: "Report index age, coverage and unresolved relationships as JSON", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
@@ -216,10 +240,24 @@ func healthCmd() *cobra.Command {
 		defer db.Close()
 		var indexed int64
 		var files, symbols, calls, resolved int
-		err = db.QueryRowContext(ctx, `SELECT indexed_at,(SELECT count(*) FROM file_cache_v2 WHERE repo=?),(SELECT count(*) FROM symbols WHERE repo=?),(SELECT count(*) FROM relations WHERE repo=?),(SELECT count(*) FROM relation_targets t JOIN relations r ON r.id=t.relation_id JOIN symbols s ON s.id=t.to_id AND s.repo=r.repo WHERE r.repo=?) FROM repo_state WHERE repo=?`, repoPath, repoPath, repoPath, repoPath, repoPath).Scan(&indexed, &files, &symbols, &calls, &resolved)
+		err = db.QueryRowContext(ctx, `SELECT indexed_at,(SELECT count(*) FROM file_cache_v2 WHERE repo=?),(SELECT count(*) FROM symbols WHERE repo=?),(SELECT count(*) FROM relations WHERE repo=? AND kind='call'),(SELECT count(*) FROM relation_targets t JOIN relations r ON r.id=t.relation_id JOIN symbols s ON s.id=t.to_id AND s.repo=r.repo WHERE r.repo=? AND r.kind='call') FROM repo_state WHERE repo=?`, repoPath, repoPath, repoPath, repoPath, repoPath).Scan(&indexed, &files, &symbols, &calls, &resolved)
 		if err != nil {
 			return fmt.Errorf("index unavailable; run trace-graph refresh: %w", err)
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "repo": repoPath, "indexed_at": indexed, "files": files, "symbols": symbols, "calls": calls, "resolved_calls": resolved, "unresolved_calls": calls - resolved, "analysis": graph.Capabilities()})
+		byResolution, err := countGroups(ctx, db, `SELECT t.resolution,count(*) FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.repo=? AND r.kind='call' GROUP BY t.resolution`, repoPath)
+		if err != nil {
+			return err
+		}
+		byKind, err := countGroups(ctx, db, `SELECT kind,count(*) FROM relations WHERE repo=? GROUP BY kind`, repoPath)
+		if err != nil {
+			return err
+		}
+		report := map[string]any{"protocol": 1, "repo": repoPath, "indexed_at": indexed, "files": files, "symbols": symbols, "calls": calls, "resolved_calls": resolved, "unresolved_calls": calls - resolved, "call_resolution": byResolution, "relations": byKind, "analysis": graph.Capabilities()}
+		// Indexes written before package-wide type checking have no pass record.
+		var detail string
+		if err := db.QueryRowContext(ctx, "SELECT detail FROM repo_resolution WHERE repo=?", repoPath).Scan(&detail); err == nil {
+			report["go_types"] = json.RawMessage(detail)
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
 	}}
 }

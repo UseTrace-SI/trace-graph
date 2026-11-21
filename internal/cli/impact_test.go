@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/UseTrace-SI/trace-graph/internal/graph"
 	"github.com/UseTrace-SI/trace-graph/internal/store"
 )
 
@@ -180,5 +181,68 @@ func TestGraphInspectionNeverCreatesDatabase(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatal("inspection created a database")
 		}
+	}
+}
+
+// Interface calls stay unresolved call relations. Their possible module
+// implementations are dispatch edges, which impact follows only on request,
+// and health counts calls separately from type relationships.
+func TestImpactAndHealthSeparateCallsFromTypeRelationships(t *testing.T) {
+	if !strings.HasPrefix(graph.Capabilities().Analyzer, "inventory") {
+		t.Skip("package-wide Go type checking runs in the default build")
+	}
+	repo, _ := filepath.EvalSymlinks(t.TempDir())
+	path := filepath.Join(t.TempDir(), "graph.db")
+	src := "package p\n\ntype Store interface{ Get() string }\n\ntype Memory struct{}\n\nfunc (Memory) Get() string { return \"\" }\n\nfunc Handle(s Store) string { return s.Get() }\n\nfunc Direct() string { return Memory{}.Get() }\n"
+	if err := os.WriteFile(filepath.Join(repo, "p.go"), []byte(src), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) []byte {
+		t.Helper()
+		var out bytes.Buffer
+		cmd := newRoot()
+		cmd.SetOut(&out)
+		cmd.SetErr(&out)
+		cmd.SetArgs(append([]string{"--repo", repo, "--db", path}, args...))
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("%v: %v %s", args, err, &out)
+		}
+		return out.Bytes()
+	}
+	run("refresh")
+	for _, tc := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"impact", "Get", "--json"}, []string{"Direct"}},
+		{[]string{"impact", "Get", "--json", "--include-dispatch"}, []string{"Handle", "Direct"}},
+	} {
+		var report impactReport
+		if err := json.Unmarshal(run(tc.args...), &report); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, node := range report.Nodes {
+			names = append(names, node.Name)
+		}
+		if strings.Join(names, ",") != strings.Join(tc.want, ",") {
+			t.Fatalf("%v: callers %v, want %v", tc.args, names, tc.want)
+		}
+	}
+	var health struct {
+		Calls          int            `json:"calls"`
+		Resolved       int            `json:"resolved_calls"`
+		CallResolution map[string]int `json:"call_resolution"`
+		Relations      map[string]int `json:"relations"`
+		GoTypes        struct {
+			Status string `json:"status"`
+		} `json:"go_types"`
+	}
+	if err := json.Unmarshal(run("health"), &health); err != nil {
+		t.Fatal(err)
+	}
+	if health.Calls != 2 || health.Resolved != 1 || health.CallResolution["typed"] != 1 || health.CallResolution["dynamic"] != 1 ||
+		health.Relations["call"] != 2 || health.Relations["implements"] != 1 || health.Relations["dispatch"] != 1 || health.GoTypes.Status != "complete" {
+		t.Fatalf("health mixed calls and type relationships: %+v", health)
 	}
 }
