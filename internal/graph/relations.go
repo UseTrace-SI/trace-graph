@@ -137,8 +137,27 @@ func maskInventory(lang, src string) string { return maskSource(lang, src, false
 // maskSource masks comments and, unless keepStrings, string literals. Kept
 // literals are still skipped, so comment markers inside them stay code.
 func maskSource(lang, src string, keepStrings bool) string {
+	out, _ := maskSpans(lang, src, keepStrings, false)
+	return out
+}
+
+// regexPrecedes lists the last significant characters after which a
+// JavaScript '/' starts a regular expression literal rather than a division.
+const regexPrecedes = "(,=:[!&|?{};+-*%<>~^"
+
+var regexKeywords = wordSetShared("return typeof instanceof in of new delete void throw case do else yield await")
+
+// maskSpans also records each terminated string literal's span (start offset
+// to end offset) when record is set. JavaScript and TypeScript regular
+// expression literals are masked like strings: a quote inside /'/ used to
+// open a "string" that inverted the masking of the rest of the file.
+func maskSpans(lang, src string, keepStrings, record bool) (string, map[int]int) {
 	b := []byte(src)
 	out := append([]byte(nil), b...)
+	var spans map[int]int
+	if record {
+		spans = map[int]int{}
+	}
 	comment := func(i int) {
 		if out[i] != '\n' && out[i] != '\r' {
 			out[i] = ' '
@@ -149,6 +168,9 @@ func maskSource(lang, src string, keepStrings bool) string {
 		literal = func(int) {}
 	}
 	hashComments, slashComments := !slashCommentOnly[lang], !hashCommentOnly[lang]
+	regexes := lang == "javascript" || lang == "typescript"
+	var prev byte // last significant code character; 'a' after a literal
+	word := ""    // identifier ending at prev
 	for i := 0; i < len(b); {
 		if lang == "rust" && b[i] == '\'' {
 			width := rustCharLiteral(b, i)
@@ -160,6 +182,7 @@ func maskSource(lang, src string, keepStrings bool) string {
 				literal(i)
 				i++
 			}
+			prev, word = 'a', ""
 			continue
 		}
 		if (hashComments && b[i] == '#') || (slashComments && b[i] == '/' && i+1 < len(b) && b[i+1] == '/') {
@@ -185,7 +208,21 @@ func maskSource(lang, src string, keepStrings bool) string {
 			}
 			continue
 		}
+		if regexes && b[i] == '/' && (prev == 0 || strings.IndexByte(regexPrecedes, prev) >= 0 || prev == '}' || (lexIdentByte(prev, true) && regexKeywords[word])) {
+			if end := regexLiteralEnd(b, i); end > 0 {
+				for j := i + 1; j < end-1; j++ {
+					literal(j)
+				}
+				i = end
+				for i < len(b) && lexIdentByte(b[i], false) {
+					i++ // flags
+				}
+				prev, word = 'a', ""
+				continue
+			}
+		}
 		if b[i] == '\'' || b[i] == '"' || b[i] == '`' {
+			start := i
 			quote := b[i]
 			width := 1
 			if i+2 < len(b) && b[i+1] == quote && b[i+2] == quote {
@@ -210,14 +247,56 @@ func maskSource(lang, src string, keepStrings bool) string {
 						literal(i)
 						i++
 					}
+					if record {
+						spans[start] = i
+					}
 					break
 				}
 				literal(i)
 				i++
 			}
+			prev, word = 'a', ""
 			continue
+		}
+		if c := b[i]; c != ' ' && c != '\t' && c != '\n' && c != '\r' {
+			if lexIdentByte(c, true) {
+				if !lexIdentByte(prev, true) {
+					word = ""
+				}
+				word += string(c)
+			} else {
+				word = ""
+			}
+			prev = c
 		}
 		i++
 	}
-	return string(out)
+	return string(out), spans
+}
+
+// regexLiteralEnd returns the offset just past a regular expression literal
+// starting at the '/' at i, or 0 when the line holds no closing '/' (then
+// the slash is a division).
+func regexLiteralEnd(b []byte, i int) int {
+	class := false
+	for j := i + 1; j < len(b); j++ {
+		switch c := b[j]; {
+		case c == '\\':
+			j++
+		case c == '\n' || c == '\r':
+			return 0
+		case class:
+			if c == ']' {
+				class = false
+			}
+		case c == '[':
+			class = true
+		case c == '/':
+			if j == i+1 {
+				return 0
+			}
+			return j + 1
+		}
+	}
+	return 0
 }

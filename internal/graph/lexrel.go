@@ -58,11 +58,13 @@ const (
 
 type lexSource struct {
 	orig, mask string
-	lines      []int // byte offset of each line start
+	lines      []int       // byte offset of each line start
+	literals   map[int]int // string literal start offset -> end offset
 }
 
 func newLexSource(lang, src string) *lexSource {
-	s := &lexSource{orig: src, mask: maskInventory(lang, src), lines: []int{0}}
+	mask, literals := maskSpans(lang, src, false, true)
+	s := &lexSource{orig: src, mask: mask, lines: []int{0}, literals: literals}
 	for i := 0; i < len(src); i++ {
 		if src[i] == '\n' {
 			s.lines = append(s.lines, i+1)
@@ -85,49 +87,52 @@ func (s *lexSource) position(offset int) (int, int) {
 	return lo + 1, offset - s.lines[lo] + 1
 }
 
+// skipSpace skips whitespace and comments (both masked to spaces) and stops
+// at a string literal's opening quote. A quote inside a comment is not a
+// literal: treating it as one read a "path" from the comment and, past the
+// call's closing parenthesis, panicked.
 func (s *lexSource) skipSpace(i int) int {
 	for i < len(s.mask) && (s.mask[i] == ' ' || s.mask[i] == '\t' || s.mask[i] == '\r' || s.mask[i] == '\n') {
-		if s.orig[i] == '"' || s.orig[i] == '\'' || s.orig[i] == '`' {
-			return i // a masked literal starts here
+		if _, ok := s.literals[i]; ok {
+			return i
 		}
 		i++
 	}
 	return i
 }
 
-// stringAt reads the literal starting at i (after whitespace). Prefixed
-// Python literals such as r"/x" are accepted; f-strings and interpolated
-// template literals are dynamic and rejected.
+// stringAt reads the string literal starting at i (after whitespace and
+// comments). Prefixed Python literals such as r"/x" are accepted; f-strings,
+// triple-quoted strings and interpolated template literals are rejected.
 func (s *lexSource) stringAt(i int) (string, int, bool) {
 	i = s.skipSpace(i)
-	if i+1 < len(s.orig) && strings.ContainsRune("rRbBuU", rune(s.orig[i])) && (s.orig[i+1] == '"' || s.orig[i+1] == '\'') {
-		i++
+	if i+1 < len(s.orig) && strings.ContainsRune("rRbBuU", rune(s.orig[i])) {
+		if _, ok := s.literals[i+1]; ok {
+			i++
+		}
 	}
-	if i >= len(s.orig) || s.mask[i] != ' ' {
+	end, ok := s.literals[i]
+	if !ok || end-i > lexRouteLimit || end-i < 2 {
 		return "", i, false
 	}
 	quote := s.orig[i]
-	if quote != '"' && quote != '\'' && quote != '`' {
+	if end-i >= 6 && s.orig[i+1] == quote && s.orig[i+2] == quote {
 		return "", i, false
 	}
 	var value strings.Builder
-	for j := i + 1; j < len(s.orig) && j-i <= lexRouteLimit; j++ {
+	for j := i + 1; j < end-1; j++ {
 		c := s.orig[j]
 		switch {
-		case c == '\\' && j+1 < len(s.orig):
+		case c == '\\' && j+1 < end-1:
 			value.WriteByte(s.orig[j+1])
 			j++
-		case c == quote:
-			return value.String(), j + 1, true
-		case c == '\n' && quote != '`':
-			return "", i, false
-		case c == '$' && quote == '`' && j+1 < len(s.orig) && s.orig[j+1] == '{':
+		case c == '$' && quote == '`' && j+1 < end-1 && s.orig[j+1] == '{':
 			return "", i, false
 		default:
 			value.WriteByte(c)
 		}
 	}
-	return "", i, false
+	return value.String(), end, true
 }
 
 func lexIdentByte(c byte, dollar bool) bool {
@@ -563,7 +568,7 @@ func jsRoutes(s *lexSource) []lexRoute {
 			continue
 		}
 		end := s.matching(open, lexStatementLimit)
-		if end < 0 {
+		if end < 0 || after > end-1 {
 			continue
 		}
 		args := splitTopLevel(s.mask[after : end-1])

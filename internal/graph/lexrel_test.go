@@ -89,3 +89,39 @@ func TestImportScansAreBounded(t *testing.T) {
 		t.Fatalf("terminated import lost: %d imports", len(imports))
 	}
 }
+
+// A quote inside a comment is not a string literal. Reading one as a route
+// path took a "path" from the comment and, when the literal ran past the
+// call's closing parenthesis, panicked and killed the whole index.
+func TestRegressionRouteLiteralsIgnoreCommentQuotes(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"app.get(/*'/x*/ path, h); log('done')\n", ""},
+		{"app.get(/* '/old-path' */ '/new-path', h)\n", "GET /new-path ->h"},
+		{"app.get( // '/old'\n  '/new', h)\n", "GET /new ->h"},
+	} {
+		var parts []string
+		for _, route := range extractRoutes("javascript", newLexSource("javascript", tc.src)) {
+			parts = append(parts, fmt.Sprintf("%s %s %s->%s", route.method, route.path, route.qualifier, route.handler))
+		}
+		if got := strings.Join(parts, " "); got != tc.want {
+			t.Errorf("%q: routes %q, want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+// A quote inside a JavaScript regular expression literal used to open a
+// "string" that inverted the masking of the rest of the file: string contents
+// became code and later declarations disappeared. Divisions stay code.
+func TestRegressionJSRegexLiteralsAreMasked(t *testing.T) {
+	for _, tc := range []struct{ src, visible, hidden string }{
+		{"const a = s.replace(/'/g, '')\nconst b = 'evil()'\nfunction after() {}\n", "function after", "evil"},
+		{"if (/[\"']/.test(x)) run()\nfunction after() {}\n", "function after", "\""},
+		{"const half = total / 2 / count\nfunction after() {}\n", "total / 2 / count", ""},
+		{"return /\\/\\//.source\n", "return", "\\/"},
+	} {
+		mask := newLexSource("javascript", tc.src).mask
+		if !strings.Contains(mask, tc.visible) || (tc.hidden != "" && strings.Contains(mask, tc.hidden)) {
+			t.Errorf("%q masked as %q", tc.src, mask)
+		}
+	}
+}
