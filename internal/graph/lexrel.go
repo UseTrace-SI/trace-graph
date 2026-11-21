@@ -60,6 +60,8 @@ type lexSource struct {
 	orig, mask string
 	lines      []int       // byte offset of each line start
 	literals   map[int]int // string literal start offset -> end offset
+	braces     map[int]int // '{' offset -> offset just past its '}'
+	code       string      // mask with string literals shown as x
 }
 
 func newLexSource(lang, src string) *lexSource {
@@ -70,7 +72,53 @@ func newLexSource(lang, src string) *lexSource {
 			s.lines = append(s.lines, i+1)
 		}
 	}
+	// Brace bodies are matched once per file, so finding each declaration's
+	// body is constant time however deeply bodies nest.
+	s.braces = map[int]int{}
+	var open []int
+	for i := 0; i < len(mask); i++ {
+		switch mask[i] {
+		case '{':
+			open = append(open, i)
+		case '}':
+			if len(open) > 0 {
+				s.braces[open[len(open)-1]] = i + 1
+				open = open[:len(open)-1]
+			}
+		}
+	}
+	code := []byte(mask)
+	for start, end := range literals {
+		for i := start; i < end; i++ {
+			if code[i] != '\n' && code[i] != '\r' {
+				code[i] = 'x'
+			}
+		}
+	}
+	s.code = string(code)
 	return s
+}
+
+// closeBrace returns the offset just past the brace closing the one at
+// open, or -1.
+func (s *lexSource) closeBrace(open int) int {
+	if end, ok := s.braces[open]; ok {
+		return end
+	}
+	return -1
+}
+
+// codeLine returns a 1-based line with comments masked and string literals
+// shown as x.
+func (s *lexSource) codeLine(line int) string {
+	if line < 1 || line > len(s.lines) {
+		return ""
+	}
+	start, end := s.lines[line-1], len(s.code)
+	if line < len(s.lines) {
+		end = s.lines[line] - 1
+	}
+	return s.code[start:end]
 }
 
 // position returns the 1-based line and column of a byte offset.

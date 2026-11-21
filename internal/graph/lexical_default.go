@@ -16,8 +16,6 @@ import (
 // lexresolve.go resolves. A call whose name (or qualifier) is a parameter or
 // local of the calling function is marked local and never resolved.
 
-const lexExtentLimit = 1 << 20 // bytes scanned for one declaration body
-
 type lexDecl struct {
 	name, kind, container string
 	signature             string
@@ -372,10 +370,14 @@ func depthAt(s *lexSource, depths []int, offset int) int {
 
 // lexBody finds a declaration body after its name: the brace body that
 // starts before a statement-ending ';', or the expression after an arrow.
+// Once the declaration's brackets are balanced, a line break ends the search
+// unless the next line continues the declaration. A bodyless declaration (a
+// TypeScript overload or a type alias written without semicolons) therefore
+// never takes a later declaration's body, and each search is bounded.
 func lexBody(lang string, s *lexSource, d *lexDecl, from int) {
 	d.bodyStart, d.bodyEnd, d.endLine = -1, -1, d.line
 	parens, arrow := 0, -1
-	for i := from; i < len(s.mask) && i-from < lexExtentLimit; i++ {
+	for i := from; i < len(s.mask) && i-from < lexStatementLimit; i++ {
 		c := s.mask[i]
 		switch {
 		case c == '(' || c == '[':
@@ -387,21 +389,64 @@ func lexBody(lang string, s *lexSource, d *lexDecl, from int) {
 			arrow = i + 2
 			i++
 		case c == '{':
-			end := s.matching(i, lexExtentLimit)
+			end := s.closeBrace(i)
 			if end < 0 {
 				return
 			}
 			d.bodyStart, d.bodyEnd = i, end
 			d.endLine, _ = s.position(end - 1)
 			return
-		case c == ';' || (c == '\n' && arrow >= 0 && strings.TrimSpace(s.mask[arrow:i]) != ""):
+		case c == ';':
 			if arrow >= 0 {
 				d.bodyStart, d.bodyEnd = arrow, i
 			}
 			d.endLine, _ = s.position(i)
 			return
+		case c == '\n':
+			if arrow >= 0 && strings.TrimSpace(s.mask[arrow:i]) != "" {
+				d.bodyStart, d.bodyEnd = arrow, i
+				d.endLine, _ = s.position(i)
+				return
+			}
+			if arrow < 0 && !lexContinues(s, i) {
+				d.endLine, _ = s.position(i)
+				return
+			}
 		}
 	}
+}
+
+var (
+	lexContinuationSuffixes = []string{",", "(", "[", "=", "|", "&", "<", ":", "=>", "->", "+", "-", "*", ".", "?", "extends", "implements", "throws"}
+	lexContinuationPrefixes = []string{"{", "|", "&", ".", "?", ":", "=>", "->", "where", "throws", "extends", "implements", ")", ">", ",", "+", "-", "="}
+)
+
+// lexContinues reports whether a declaration continues past the line break
+// at i: its line ends with an operator or opening bracket, or the next
+// non-blank line opens the body or continues a clause. String literals
+// count as operands, so `type Mode = 'a' | 'b'` ends with its line.
+func lexContinues(s *lexSource, i int) bool {
+	line, _ := s.position(i)
+	if text := strings.TrimRight(s.codeLine(line), " \t\r"); text != "" {
+		for _, suffix := range lexContinuationSuffixes {
+			if strings.HasSuffix(text, suffix) {
+				return true
+			}
+		}
+	}
+	for next := line + 1; next <= len(s.lines) && next <= line+8; next++ {
+		text := strings.TrimSpace(s.codeLine(next))
+		if text == "" {
+			continue
+		}
+		for _, prefix := range lexContinuationPrefixes {
+			if strings.HasPrefix(text, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // pyBody extends a Python def or class over its indented block, past a

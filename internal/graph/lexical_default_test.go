@@ -222,3 +222,44 @@ func TestRegressionPythonSingleComponentModuleResolves(t *testing.T) {
 	expectEdges(t, goEdges(t, db, root, "call"), map[string]goEdge{"test_run->run@4": lexEdge("scripts/tool.py:run:1")})
 	expectEdges(t, goEdges(t, db, root, "import"), map[string]goEdge{"scripts/tool_test.py->run@1": lexEdge("scripts/tool.py:run:1")})
 }
+
+// Without semicolons, a bodyless TypeScript declaration searched up to 1 MiB
+// for a '{' or ';': a type alias took the next function's body as its extent
+// and calls in an overloaded implementation were attributed to its first
+// signature.
+func TestRegressionLexicalBodylessDeclarationsKeepTheirExtent(t *testing.T) {
+	db, root := goTypeFixture(t, map[string]string{
+		"a.ts": "export type Mode = 'a' | 'b'\n\nexport function parse(a: string): number\nexport function parse(a: number): number\nexport function parse(a: any): number {\n  return helper(a)\n}\n\nfunction helper(a: any) { return 1 }\n",
+	})
+	var end int
+	if err := db.QueryRow("SELECT c.end_line FROM symbol_content c JOIN symbols s ON s.id=c.symbol_id WHERE s.repo=? AND s.name='Mode'", root).Scan(&end); err != nil || end != 1 {
+		t.Fatalf("type alias extent ends at %d (%v), want 1", end, err)
+	}
+	var from string
+	if err := db.QueryRow("SELECT t.from_id FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.repo=? AND r.kind='call' AND r.to_symbol='helper'", root).Scan(&from); err != nil || unscoped(from) != "a.ts:parse:5" {
+		t.Fatalf("helper call attributed to %q (%v), want the implementation a.ts:parse:5", unscoped(from), err)
+	}
+}
+
+// Body searches are bounded per declaration and brace bodies are matched
+// once per file. 40000 semicolon-less type aliases took 61 s (past the index
+// deadline) and 8000 nested functions 15 s.
+func TestLexicalBodySearchesAreBounded(t *testing.T) {
+	var aliases, nested strings.Builder
+	for i := 0; i < 40000; i++ {
+		fmt.Fprintf(&aliases, "export type T%d = 'a' | 'b'\n", i)
+	}
+	for i := 0; i < 8000; i++ {
+		fmt.Fprintf(&nested, "function f%d() {\n", i)
+	}
+	nested.WriteString(strings.Repeat("}\n", 8000))
+	for _, tc := range []struct{ lang, src string }{{"typescript", aliases.String()}, {"javascript", nested.String()}} {
+		start := time.Now()
+		s := newLexSource(tc.lang, tc.src)
+		decls := lexDeclarations(tc.lang, s)
+		lexCalls(tc.lang, s, decls)
+		if elapsed := time.Since(start); elapsed > 10*time.Second || len(decls) == 0 {
+			t.Fatalf("%s: %d declarations in %v", tc.lang, len(decls), elapsed)
+		}
+	}
+}
