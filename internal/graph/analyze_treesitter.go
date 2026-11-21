@@ -32,9 +32,62 @@ var tsLangs = map[string]*ts.Language{
 	".rb":   ts.NewLanguage(tsrb.Language()),
 }
 
-const analyzerVersion = "treesitter-v4"
+const analyzerVersion = "treesitter-v5"
 
 func supportedFile(ext string) bool { _, ok := tsLangs[ext]; return ok }
+
+// tsDeclarations are the declaration nodes of the pinned grammars. Each one
+// must carry a name field, except C/C++ function_declarator, which is named
+// by its declarator. A substring match on "function"/"method" used to promote
+// call sites (Java method_invocation, C++ template_function, Rust
+// generic_function), types (function_type) and parameters (Ruby
+// method_parameters, arrow-function parameters and bodies) to declarations:
+// same-name call sites on one line such as sb.append(a).append(b) or
+// xs.map(x => x).filter(x => x) then collided and failed the whole index.
+var tsDeclarations = map[string]bool{
+	// Go
+	"function_declaration": true, "method_declaration": true, "method_elem": true, "type_spec": true,
+	// Python (and C/C++ function_definition, which has no name field)
+	"function_definition": true, "class_definition": true,
+	// JavaScript and TypeScript
+	"generator_function_declaration": true, "method_definition": true, "class_declaration": true,
+	"function_expression": true, "generator_function": true, "interface_declaration": true,
+	"enum_declaration": true, "function_signature": true, "method_signature": true, "abstract_method_signature": true,
+	// Rust
+	"function_item": true, "function_signature_item": true, "struct_item": true, "enum_item": true, "trait_item": true,
+	// C and C++
+	"function_declarator": true, "preproc_function_def": true,
+	// Ruby
+	"method": true, "singleton_method": true,
+}
+
+// tsCallSites contain "function" or "method" in their kind but are
+// expressions, so call extraction must look inside them.
+var tsCallSites = map[string]bool{"method_invocation": true, "method_reference": true, "generic_function": true, "template_function": true, "template_method": true}
+
+// tsNestedScope stops call attribution at nested function-like nodes, whose
+// calls belong to them rather than to the enclosing declaration.
+func tsNestedScope(kind string) bool {
+	return (strings.Contains(kind, "function") || strings.Contains(kind, "method")) && !tsCallSites[kind]
+}
+
+// tsDeclarationName returns the declared name node, or nil for a node that is
+// not a named declaration.
+func tsDeclarationName(node *ts.Node) *ts.Node {
+	if !tsDeclarations[node.Kind()] {
+		return nil
+	}
+	if name := node.ChildByFieldName("name"); name != nil {
+		return name
+	}
+	if node.Kind() != "function_declarator" {
+		return nil
+	}
+	if declarator := node.ChildByFieldName("declarator"); declarator != nil && strings.HasSuffix(declarator.Kind(), "identifier") {
+		return declarator
+	}
+	return nil
+}
 
 func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, error) {
 	db.namespace = rel
@@ -58,68 +111,47 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			return
 		}
 		kind := node.Kind()
-		isSym := kind == "function_declaration" || kind == "function_definition" || kind == "method_declaration" ||
-			kind == "class_definition" || kind == "type_spec" || kind == "type_declaration" ||
-			kind == "function_item" || kind == "struct_item" || kind == "enum_item" ||
-			kind == "trait_item" || kind == "impl_item" || kind == "interface_declaration" ||
-			kind == "class_declaration" || kind == "enum_declaration" || kind == "method_definition" ||
-			strings.Contains(kind, "function") || strings.Contains(kind, "method")
-		if isSym {
-			nameNode := node.ChildByFieldName("name")
-			if nameNode == nil && node.ChildCount() > 0 {
-				for i := uint(0); i < node.ChildCount(); i++ {
-					c := node.Child(i)
-					if c != nil && !c.IsNamed() {
-						continue
+		if nameNode := tsDeclarationName(node); nameNode != nil {
+			name := nameNode.Utf8Text(src)
+			line := int(node.StartPosition().Row) + 1
+			symKind := "func"
+			if strings.Contains(kind, "class") || strings.Contains(kind, "struct") || strings.Contains(kind, "enum") ||
+				strings.Contains(kind, "trait") || strings.Contains(kind, "interface") || strings.Contains(kind, "type") {
+				symKind = "type"
+			}
+			id := rel + ":" + name + ":" + itoa(line)
+			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
+				id, repo, rel, name, symKind, line, kind+" "+name)
+			db.content(repo, id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
+			n++
+			// calls within: find call_expression children
+			var findCalls func(n *ts.Node)
+			findCalls = func(n *ts.Node) {
+				if n == nil {
+					return
+				}
+				if n.Id() != node.Id() && tsNestedScope(n.Kind()) {
+					return
+				}
+				if n.Kind() == "call_expression" || n.Kind() == "call" || n.Kind() == "method_invocation" {
+					fn := n.ChildByFieldName("function")
+					if fn == nil {
+						fn = n.ChildByFieldName("name")
 					}
-					if c != nil && (c.Kind() == "identifier" || c.Kind() == "type_identifier" || strings.HasSuffix(c.Kind(), "identifier")) {
-						nameNode = c
-						break
+					if fn != nil {
+						callee := fn.Utf8Text(src)
+						// take last identifier
+						if idx := strings.LastIndex(callee, "."); idx >= 0 {
+							callee = callee[idx+1:]
+						}
+						db.call(repo, rel, id, name, callee, int(n.StartPosition().Row)+1, int(n.StartPosition().Column)+1, "unresolved")
 					}
+				}
+				for i := uint(0); i < n.ChildCount(); i++ {
+					findCalls(n.Child(i))
 				}
 			}
-			if nameNode != nil {
-				name := nameNode.Utf8Text(src)
-				line := int(node.StartPosition().Row) + 1
-				symKind := "func"
-				if strings.Contains(kind, "class") || strings.Contains(kind, "struct") || strings.Contains(kind, "enum") ||
-					strings.Contains(kind, "trait") || strings.Contains(kind, "interface") || strings.Contains(kind, "type") {
-					symKind = "type"
-				}
-				id := rel + ":" + name + ":" + itoa(line)
-				db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-					id, repo, rel, name, symKind, line, kind+" "+name)
-				db.content(repo, id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
-				n++
-				// calls within: find call_expression children
-				var findCalls func(n *ts.Node)
-				findCalls = func(n *ts.Node) {
-					if n == nil {
-						return
-					}
-					if n.Id() != node.Id() && (strings.Contains(n.Kind(), "function") || strings.Contains(n.Kind(), "method")) {
-						return
-					}
-					if n.Kind() == "call_expression" || n.Kind() == "call" || n.Kind() == "method_invocation" {
-						fn := n.ChildByFieldName("function")
-						if fn == nil {
-							fn = n.ChildByFieldName("name")
-						}
-						if fn != nil {
-							callee := fn.Utf8Text(src)
-							// take last identifier
-							if idx := strings.LastIndex(callee, "."); idx >= 0 {
-								callee = callee[idx+1:]
-							}
-							db.call(repo, rel, id, name, callee, int(n.StartPosition().Row)+1, int(n.StartPosition().Column)+1, "unresolved")
-						}
-					}
-					for i := uint(0); i < n.ChildCount(); i++ {
-						findCalls(n.Child(i))
-					}
-				}
-				findCalls(node)
-			}
+			findCalls(node)
 		}
 		for i := uint(0); i < node.ChildCount(); i++ {
 			walk(node.Child(i))
