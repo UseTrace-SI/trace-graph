@@ -74,12 +74,15 @@ var symbolPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\s*defn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 }
 
-const analyzerVersion = "inventory-v7"
+const analyzerVersion = "inventory-v8"
 
 func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
 
 func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, error) {
-	if langExts[strings.ToLower(filepathExt(rel))] != "go" {
+	if lang := langExts[strings.ToLower(filepathExt(rel))]; lang != "go" {
+		if lexDeclarationLanguage(lang) {
+			return analyzeLexicalFile(lang, repo, rel, string(src), db)
+		}
 		return analyzeRegexFile(repo, rel, string(src), db)
 	}
 	db.namespace = pathpkg.Dir(rel)
@@ -89,6 +92,11 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 		return analyzeRegexFile(repo, rel, string(src), db)
 	}
 	db.namespace = pathpkg.Dir(rel) + "|" + file.Name.Name
+	// Symbols and calls live at physical positions in this file. //line
+	// directives in generated code remap lines (and zero columns), which
+	// would move symbols and merge distinct call sites into one ID.
+	position := func(pos token.Pos) token.Position { return fset.PositionFor(pos, false) }
+	packageLevel := filePackageTypes(file)
 	imports := map[string]string{}
 	module := ""
 	if db.moduleOverride != nil {
@@ -113,17 +121,22 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			line := fset.Position(d.Pos()).Line
+			// The blank identifier declares nothing; `var _, _ = f()` used to
+			// yield two identical identities and fail the whole index.
+			if d.Name.Name == "_" {
+				continue
+			}
+			line := position(d.Pos()).Line
 			kind := "func"
 			if d.Recv != nil {
 				kind = "method"
 			}
-			id := rel + ":" + d.Name.Name + ":" + itoa(line)
+			id := goSymbolID(rel, d.Name.Name, line)
 			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 				id, repo, rel, d.Name.Name, kind, line, goSignature(fset, d))
-			db.content(repo, id, src[fset.Position(d.Pos()).Offset:fset.Position(d.End()).Offset], fset.Position(d.End()).Line)
+			db.content(repo, id, src[position(d.Pos()).Offset:position(d.End()).Offset], position(d.End()).Line)
 			if d.Recv != nil && len(d.Recv.List) == 1 {
-				if receiver := declaredTypeName(d.Recv.List[0].Type); receiver != "" && db.err == nil {
+				if receiver := declaredTypeName(packageLevel, d.Recv.List[0].Type); receiver != "" && db.err == nil {
 					_, _ = db.write("INSERT INTO symbol_receivers(symbol_id,receiver) VALUES(?,?) ON CONFLICT(symbol_id) DO UPDATE SET receiver=excluded.receiver", scopedID(repo, id), receiver)
 				}
 			}
@@ -131,55 +144,55 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			if d.Body == nil {
 				continue
 			}
-			ast.Inspect(d.Body, func(node ast.Node) bool {
-				// A closure's calls belong to the closure, not to the enclosing function.
-				if _, ok := node.(*ast.FuncLit); ok {
-					return false
-				}
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fn := call.Fun.(type) {
+			hintFor := func(expr ast.Expr) string {
+				hint := "unresolved"
+				switch fn := expr.(type) {
 				case *ast.Ident:
-					hint := "unresolved"
 					if fn.Obj == nil || fn.Obj.Kind == ast.Fun {
 						hint = "identifier"
 					}
-					db.call(repo, rel, id, d.Name.Name, fn.Name, fset.Position(call.Pos()).Line, fset.Position(call.Pos()).Column, hint)
 				case *ast.SelectorExpr:
-					hint := "unresolved"
 					if alias, ok := fn.X.(*ast.Ident); ok && alias.Obj == nil {
 						if dir, ok := imports[alias.Name]; ok {
 							hint = "package:" + dir
 						}
 					}
 					if hint == "unresolved" {
-						if receiver := receiverType(fn.X); receiver != "" {
+						if receiver := receiverType(packageLevel, fn.X); receiver != "" {
 							hint = "receiver:" + receiver
 						}
 					}
-					db.call(repo, rel, id, d.Name.Name, fn.Sel.Name, fset.Position(call.Pos()).Line, fset.Position(call.Pos()).Column, hint)
 				}
-				return true
-			})
+				return hint
+			}
+			for _, site := range goCallSites(d.Body) {
+				at := position(site.call.Pos())
+				db.call(repo, rel, id, d.Name.Name, site.callee, at.Line, at.Column, hintFor(site.fun))
+				if method, path, handler, ok := goRoute(site); ok {
+					// The handler reference resolves like a call of it.
+					db.relation(repo, rel, goRouteRelationID(id, at.Line, at.Column), id, method+" "+path, goHandlerName(handler), "route", at.Line, hintFor(handler))
+				}
+			}
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
-				if ts, ok := spec.(*ast.TypeSpec); ok {
-					line := fset.Position(ts.Pos()).Line
-					id := rel + ":" + ts.Name.Name + ":" + itoa(line)
+				if ts, ok := spec.(*ast.TypeSpec); ok && ts.Name.Name != "_" {
+					line := position(ts.Pos()).Line
+					id := goSymbolID(rel, ts.Name.Name, line)
 					db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 						id, repo, rel, ts.Name.Name, "type", line, "type "+ts.Name.Name)
-					db.content(repo, id, src[fset.Position(ts.Pos()).Offset:fset.Position(ts.End()).Offset], fset.Position(ts.End()).Line)
+					db.content(repo, id, src[position(ts.Pos()).Offset:position(ts.End()).Offset], position(ts.End()).Line)
 					n++
 				}
 				if vs, ok := spec.(*ast.ValueSpec); ok {
 					for _, nm := range vs.Names {
-						line := fset.Position(nm.Pos()).Line
-						id := rel + ":" + nm.Name + ":" + itoa(line)
+						if nm.Name == "_" {
+							continue
+						}
+						line := position(nm.Pos()).Line
+						id := goSymbolID(rel, nm.Name, line)
 						db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 							id, repo, rel, nm.Name, "var", line, "var "+nm.Name)
-						db.content(repo, id, src[fset.Position(vs.Pos()).Offset:fset.Position(vs.End()).Offset], fset.Position(vs.End()).Line)
+						db.content(repo, id, src[position(vs.Pos()).Offset:position(vs.End()).Offset], position(vs.End()).Line)
 						n++
 					}
 				}
@@ -193,7 +206,7 @@ func analyzeRegexFile(repo, rel, src string, db *indexWriter) (int, error) {
 	db.namespace = pathpkg.Dir(rel)
 	// Classification and the source hash use the masked line. A trailing
 	// "// class marker" comment must not turn an arrow function into a type.
-	lines := strings.Split(maskInventory(src), "\n")
+	lines := strings.Split(maskInventory(langExts[strings.ToLower(filepathExt(rel))], src), "\n")
 	n := 0
 	for i, line := range lines {
 		for _, pat := range symbolPatterns {

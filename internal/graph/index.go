@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -19,13 +20,15 @@ import (
 // indexWriter preserves the first database error, including writes made from
 // parser callbacks. The surrounding transaction is never committed on failure.
 type indexWriter struct {
-	tx              *sql.Tx
-	err             error
-	namespace       string
-	moduleOverride  *string
-	maxRecords      int
-	records         int
-	symbolIDs       map[string]bool
+	tx             *sql.Tx
+	err            error
+	namespace      string
+	moduleOverride *string
+	maxRecords     int
+	records        int
+	symbolIDs      map[string]bool
+	// shapes collects rename evidence during revision analysis only.
+	shapes map[string]symbolShape
 }
 
 // write is the single counted write path. Symbol metadata rows must share the
@@ -75,7 +78,7 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 			w.symbolIDs = map[string]bool{}
 		}
 		if w.symbolIDs[id] {
-			w.err = fmt.Errorf("repository contains colliding declaration identities; separate same-name declarations onto different lines")
+			w.err = fmt.Errorf("repository contains colliding declaration identities (%s); separate same-name declarations onto different lines", id)
 			return nil, w.err
 		}
 		w.symbolIDs[id] = true
@@ -103,6 +106,11 @@ func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
 		return
 	}
 	_, _ = w.write("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
+	if w.shapes != nil && w.err == nil {
+		if file, name := splitSymbolID(id); renameShapeLanguage(file) {
+			w.shapes[scopedID(repo, id)] = shapeOf(shapeLanguage(file), name, src)
+		}
+	}
 }
 
 func filepathExt(path string) string { return filepath.Ext(path) }
@@ -182,38 +190,24 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	defer tx.Rollback()
 	w := &indexWriter{tx: tx}
 	seen := map[string]bool{}
-	n := 0
+	n, analyzed := 0, 0
 	var totalBytes int64
-	err = walkSourcesContext(ctx, root, func(path string, entry fs.DirEntry, walkErr error) error {
+	// Every Go file, cached or not, takes part in package-wide type checking.
+	var goSources []goSource
+	goBytes, goOverBudget := 0, false
+	err = walkSourcesContext(ctx, root, func(rel string, f *os.File) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if !entry.Type().IsRegular() || !supportedFile(strings.ToLower(filepath.Ext(path))) {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
+		path := filepath.Join(root, rel)
 		rel = filepath.ToSlash(rel)
 		seen[rel] = true
 		if len(seen) > 100000 {
 			return fmt.Errorf("repository exceeds 100000 source files")
 		}
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
 		src, err := io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
-		closeErr := f.Close()
 		if err != nil {
 			return err
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 		if len(src) > 8*1024*1024 {
 			return fmt.Errorf("source exceeds 8 MiB: %s", rel)
@@ -222,7 +216,15 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if totalBytes > 512*1024*1024 {
 			return fmt.Errorf("repository sources exceed 512 MiB")
 		}
-		digest := fmt.Sprintf("%s:%s:%x", analyzerVersion, modDigest, sha256.Sum256(src))
+		if goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go") {
+			if goBytes += len(src); goBytes > goTypeSourceBudget {
+				goOverBudget, goSources = true, nil
+			} else if !goOverBudget {
+				goSources = append(goSources, goSource{rel: rel, src: src})
+			}
+		}
+		// Type-checked resolution follows the platform's build constraints.
+		digest := fmt.Sprintf("%s@%s/%s:%s:%x", analyzerVersion, runtime.GOOS, runtime.GOARCH, modDigest, sha256.Sum256(src))
 		var old string
 		err = tx.QueryRowContext(ctx, "SELECT digest FROM file_cache_v2 WHERE repo=? AND path=?", root, rel).Scan(&old)
 		if err != nil && err != sql.ErrNoRows {
@@ -245,6 +247,7 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 			return err
 		}
 		n += count
+		analyzed++
 		return nil
 	})
 	if err != nil {
@@ -275,7 +278,7 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 			return 0, err
 		}
 	}
-	if err := resolveCalls(ctx, tx, root); err != nil {
+	if err := resolveRepository(ctx, tx, root, analyzed > 0 || len(deleted) > 0, goSources, goOverBudget); err != nil {
 		return 0, err
 	}
 	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
@@ -315,6 +318,47 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		return 0, err
 	}
 	return n, nil
+}
+
+// resolveRepository recomputes every relation target of a generation. With
+// no changed or deleted file, a complete previous pass is still exact, so an
+// unchanged refresh skips the work.
+func resolveRepository(ctx context.Context, tx *sql.Tx, root string, changed bool, goSources []goSource, goOverBudget bool) error {
+	if !changed {
+		var complete int
+		err := tx.QueryRowContext(ctx, "SELECT complete FROM repo_resolution WHERE repo=?", root).Scan(&complete)
+		if err == nil && complete == 1 {
+			return nil
+		}
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+	}
+	// Edges derived by the Go type pass depend on other files, so they are
+	// always rebuilt. Lexical implements edges belong to their file.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM relations WHERE repo=? AND kind IN ('implements','dispatch') AND id IN (SELECT relation_id FROM relation_targets WHERE hint='implements' OR substr(hint,1,9)='dispatch:')", root); err != nil {
+		return err
+	}
+	if err := resolveCalls(ctx, tx, root); err != nil {
+		return err
+	}
+	if err := resolveLexical(ctx, tx, root); err != nil {
+		return fmt.Errorf("resolving imports and lexical calls: %w", err)
+	}
+	stats, err := resolveGoTypes(ctx, tx, root, moduleName(root), goSources, goOverBudget)
+	if err != nil {
+		return fmt.Errorf("resolving Go types: %w", err)
+	}
+	detail, err := json.Marshal(stats)
+	if err != nil {
+		return err
+	}
+	complete := 1
+	if stats.Status == "partial" {
+		complete = 0
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO repo_resolution(repo,complete,detail) VALUES(?,?,?) ON CONFLICT(repo) DO UPDATE SET complete=excluded.complete,detail=excluded.detail", root, complete, string(detail))
+	return err
 }
 
 func removeFile(tx *sql.Tx, repo, path string) error {

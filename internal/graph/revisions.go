@@ -48,6 +48,7 @@ type RevisionStats struct {
 	SourceBytes  int64 `json:"source_bytes"`
 	sources      []revisionSource
 	paths        map[string]bool
+	shapes       map[string]symbolShape
 }
 
 // Git flags are probed once so an older Git is not handed an option it cannot
@@ -110,14 +111,18 @@ func (c *revisionCmd) failure(err error) error {
 	return fmt.Errorf("local Git comparison command failed (locally available Git objects and a supported Git version may be required): %w: %s", err, detail)
 }
 
-// The explicit flags fail closed on older Git, prohibit lazy network fetches
-// and replacement objects, and avoid index refreshes. No checkout/filter runs.
-func revisionGit(ctx context.Context, root string, args ...string) *revisionCmd {
+// localGitCommand is the only way Graph runs Git. Hooks export GIT_DIR,
+// GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CONFIG_* to their children, so ambient
+// GIT_* variables are dropped rather than allowed to redirect a command to
+// another repository, index or configuration. The explicit flags fail closed
+// on older Git, prohibit lazy network fetches and replacement objects, avoid
+// index refreshes and never run a configured filesystem-monitor command.
+func localGitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
 	flags := []string{"--no-pager"}
 	if gitMeetsVersion(2, 45) {
 		flags = append(flags, "--no-lazy-fetch")
 	}
-	flags = append(flags, "--no-replace-objects", "--no-optional-locks", "-C", root)
+	flags = append(flags, "--no-replace-objects", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", root)
 	cmd := exec.CommandContext(ctx, "git", append(flags, args...)...)
 	for _, value := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(value), "GIT_") {
@@ -125,9 +130,20 @@ func revisionGit(ctx context.Context, root string, args ...string) *revisionCmd 
 		}
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_OPTIONAL_LOCKS=0")
-	result := &revisionCmd{Cmd: cmd}
-	cmd.Stderr = &result.stderr
 	cmd.WaitDelay = time.Second
+	return cmd
+}
+
+// LocalGitCommand gives read-only CLI history scans the same isolation as
+// indexing and revision comparison.
+func LocalGitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
+	return localGitCommand(ctx, root, args...)
+}
+
+// No checkout or filter runs for revision comparisons.
+func revisionGit(ctx context.Context, root string, args ...string) *revisionCmd {
+	result := &revisionCmd{Cmd: localGitCommand(ctx, root, args...)}
+	result.Cmd.Stderr = &result.stderr
 	return result
 }
 
@@ -138,7 +154,7 @@ type revisionBuffer struct {
 
 func (b *revisionBuffer) Write(p []byte) (int, error) {
 	if len(p) > b.limit-b.Len() {
-		return 0, fmt.Errorf("Git output exceeds comparison budget")
+		return 0, fmt.Errorf("output from Git exceeds the comparison budget")
 	}
 	return b.Buffer.Write(p)
 }
@@ -169,7 +185,7 @@ func resolveCommit(ctx context.Context, root, ref string) (string, error) {
 	}
 	oid := strings.TrimSpace(string(out))
 	if !objectID(oid) {
-		return "", fmt.Errorf("Git returned an invalid commit identity")
+		return "", fmt.Errorf("invalid commit identity returned by Git")
 	}
 	return oid, nil
 }
@@ -237,7 +253,7 @@ func listRevision(ctx context.Context, root, commit string) (revision, error) {
 		}
 		seen[file] = true
 		if len(seen) > 100000 {
-			return result, fmt.Errorf("Git revision exceeds 100000 entries")
+			return result, fmt.Errorf("revision from Git exceeds 100000 entries")
 		}
 		size := int64(-1)
 		if fields[3] != "-" {
@@ -366,11 +382,11 @@ func (b *revisionBatch) read(entry revisionEntry, limit int64) ([]byte, error) {
 	}
 	fields := strings.Fields(string(header))
 	if len(fields) != 3 || fields[0] != entry.oid || fields[1] != "blob" {
-		return nil, fmt.Errorf("Git object is unavailable locally or has an unexpected identity/type")
+		return nil, fmt.Errorf("object from Git is unavailable locally or has an unexpected identity/type")
 	}
 	size, err := strconv.ParseInt(fields[2], 10, 64)
 	if err != nil || size != entry.size || size > limit {
-		return nil, fmt.Errorf("Git object size does not match its tree entry")
+		return nil, fmt.Errorf("object size from Git does not match its tree entry")
 	}
 	data := make([]byte, int(size))
 	if _, err := io.ReadFull(b.output, data); err != nil {
@@ -466,7 +482,7 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 			return stats, err
 		}
 	}
-	writer := &indexWriter{tx: tx, moduleOverride: &module, maxRecords: 100000}
+	writer := &indexWriter{tx: tx, moduleOverride: &module, maxRecords: 100000, shapes: map[string]symbolShape{}}
 	for _, entry := range selected.entries {
 		if err := ctx.Err(); err != nil {
 			return stats, err
@@ -509,5 +525,6 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 		return stats, err
 	}
 	stats.Observations = writer.records
+	stats.shapes = writer.shapes
 	return stats, nil
 }

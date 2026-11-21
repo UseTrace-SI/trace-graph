@@ -87,6 +87,7 @@ CREATE INDEX IF NOT EXISTS relations_from ON relations(from_symbol);
 CREATE INDEX IF NOT EXISTS relations_to ON relations(to_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_from ON relations(repo,from_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_to ON relations(repo,to_symbol);
+CREATE INDEX IF NOT EXISTS relations_repo_file ON relations(repo,file);
 CREATE TABLE IF NOT EXISTS symbol_scopes(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,repo TEXT NOT NULL,namespace TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS symbol_scopes_namespace ON symbol_scopes(repo,namespace);
 CREATE TABLE IF NOT EXISTS symbol_content(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,source_hash TEXT NOT NULL,end_line INTEGER NOT NULL);
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS symbol_receivers(symbol_id TEXT PRIMARY KEY REFERENCE
 CREATE TABLE IF NOT EXISTS relation_targets(relation_id TEXT PRIMARY KEY REFERENCES relations(id) ON DELETE CASCADE,from_id TEXT NOT NULL,to_id TEXT,namespace TEXT NOT NULL,hint TEXT NOT NULL,resolution TEXT NOT NULL DEFAULT 'unresolved');
 CREATE INDEX IF NOT EXISTS relation_targets_from ON relation_targets(from_id);
 CREATE INDEX IF NOT EXISTS relation_targets_to ON relation_targets(to_id);
+CREATE TABLE IF NOT EXISTS repo_resolution(repo TEXT PRIMARY KEY,complete INTEGER NOT NULL,detail TEXT NOT NULL);
 
 `
 	if _, err := tx.Exec(schema); err != nil {

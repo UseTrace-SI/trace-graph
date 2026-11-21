@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // InspectableSource applies the same file policy as indexing. Read-only
@@ -30,16 +30,32 @@ func excludedSource(rel string) bool {
 	return false
 }
 
+// sourceVisitor receives a repository-relative path and the source opened
+// beneath the repository root. The walk closes the file after the visit.
+type sourceVisitor func(rel string, file *os.File) error
+
 // Git decides which source files belong to a checkout, matching Trace capture.
 // Standalone source directories remain supported without requiring Git.
-func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) error {
+//
+// Every read is anchored to the repository root. Git's index can still list
+// dir/file.go after dir was replaced by a symlink leaving the checkout, and a
+// final-component Lstat follows such a parent, so sources beneath a symlinked
+// directory are skipped (Git itself treats them as deleted). The open cannot
+// escape the root, does not block on a FIFO swapped in after the check, and
+// must yield the same regular file that was checked.
+func walkSourcesContext(ctx context.Context, root string, visit sourceVisitor) error {
 	ignored, err := projectExclusions(root)
 	if err != nil {
 		return err
 	}
+	anchor, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer anchor.Close()
 	var paths []string
 	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
-		cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+		cmd := localGitCommand(ctx, root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
 		var output sourceListBuffer
 		cmd.Stdout = &output
 		err := cmd.Run()
@@ -79,6 +95,30 @@ func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) 
 			return err
 		}
 	}
+	realDirs := map[string]bool{}
+	var realParent func(dir string) (bool, error)
+	realParent = func(dir string) (bool, error) {
+		if dir == "." || dir == "" {
+			return true, nil
+		}
+		if real, ok := realDirs[dir]; ok {
+			return real, nil
+		}
+		real, err := realParent(filepath.Dir(dir))
+		if err == nil && real {
+			var info fs.FileInfo
+			info, err = anchor.Lstat(dir)
+			real = err == nil && info.IsDir()
+			if os.IsNotExist(err) {
+				err = nil
+			}
+		}
+		if err != nil {
+			return false, err
+		}
+		realDirs[dir] = real
+		return real, nil
+	}
 	for _, rel := range paths {
 		if rel == "" || excludedSource(rel) || ignored(rel) || !supportedFile(strings.ToLower(filepath.Ext(rel))) {
 			continue
@@ -86,22 +126,64 @@ func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) 
 		if filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(filepath.ToSlash(rel), "../") {
 			return fmt.Errorf("source path is outside repository")
 		}
-		path := filepath.Join(root, rel)
-		info, err := os.Lstat(path)
-		if os.IsNotExist(err) {
+		if real, err := realParent(filepath.Dir(rel)); err != nil {
+			return err
+		} else if !real {
 			continue
 		}
+		file, err := openRegularSource(anchor, rel)
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
+		if file == nil {
 			continue
 		}
-		if err := visit(path, fs.FileInfoToDirEntry(info), nil); err != nil {
+		err = visit(rel, file)
+		closeErr := file.Close()
+		if err != nil {
 			return err
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 	return nil
+}
+
+// openRegularSource returns nil for a missing or non-regular path. A path that
+// is atomically replaced between the check and the open (an editor save) is
+// checked once more before the change is reported.
+func openRegularSource(anchor *os.Root, rel string) (*os.File, error) {
+	for attempt := 0; ; attempt++ {
+		expected, err := anchor.Lstat(rel)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if !expected.Mode().IsRegular() {
+			return nil, nil
+		}
+		file, err := anchor.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		actual, err := file.Stat()
+		if err == nil && actual.Mode().IsRegular() && os.SameFile(expected, actual) {
+			return file, nil
+		}
+		file.Close()
+		if err != nil {
+			return nil, err
+		}
+		if attempt > 0 {
+			return nil, fmt.Errorf("source changed while indexing: %s", filepath.ToSlash(rel))
+		}
+	}
 }
 
 type sourceListBuffer struct{ bytes.Buffer }

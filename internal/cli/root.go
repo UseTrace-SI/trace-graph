@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -71,6 +70,9 @@ func newRoot() *cobra.Command {
 
 func Execute() error { return newRoot().Execute() }
 
+// openDB creates or migrates the index and therefore takes the SQLite writer.
+// Only commands that write a generation use it; lookups use readIndex so they
+// neither create an index nor wait behind an indexing transaction.
 func openDB() (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, err
@@ -105,7 +107,7 @@ func analyzeCmd() *cobra.Command {
 
 func symbolsCmd() *cobra.Command {
 	return &cobra.Command{Use: "symbols", RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}
@@ -133,7 +135,7 @@ func queryCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}
@@ -157,7 +159,7 @@ func queryCmd() *cobra.Command {
 
 func neighborsCmd() *cobra.Command {
 	return &cobra.Command{Use: "neighbors", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}
@@ -183,7 +185,7 @@ func neighborsCmd() *cobra.Command {
 		}
 		rows.Close()
 		r2, err := db.Query(`SELECT DISTINCT r.from_symbol,r.file,r.line FROM relations r LEFT JOIN relation_targets t ON t.relation_id=r.id
- WHERE r.repo=? AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line`, repoPath, repoPath, name, name, name)
+ WHERE r.repo=? AND r.kind IN ('call','dispatch') AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line`, repoPath, repoPath, name, name, name)
 		if err != nil {
 			return err
 		}
@@ -203,7 +205,7 @@ func neighborsCmd() *cobra.Command {
 
 func defCmd() *cobra.Command {
 	return &cobra.Command{Use: "def", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}
@@ -250,6 +252,16 @@ func maxFilesForPairBudget(maxPairs int) int {
 	return lo
 }
 
+func splitNUL(data []byte, atEOF bool) (int, []byte, error) {
+	if i := bytes.IndexByte(data, 0); i >= 0 {
+		return i + 1, data[:i], nil
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
 func cochangeCmd() *cobra.Command {
 	var maxCount, maxPairs, maxBytes int
 	cmd := &cobra.Command{Use: "cochange", Short: "Report files that change together", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -258,8 +270,10 @@ func cochangeCmd() *cobra.Command {
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 		defer cancel()
-		// Stream a bounded log instead of loading all history into memory.
-		gitcmd := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
+		// Stream a bounded log instead of loading all history into memory. The
+		// isolated invocation cannot be redirected to another repository by
+		// ambient GIT_* variables and never fetches missing objects.
+		gitcmd := graph.LocalGitCommand(ctx, repoPath, "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
 		pipe, err := gitcmd.StdoutPipe()
 		if err != nil {
 			return err
@@ -282,26 +296,34 @@ func cochangeCmd() *cobra.Command {
 		limited := &io.LimitedReader{R: pipe, N: int64(maxBytes) + 1}
 		scanner := bufio.NewScanner(limited)
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		// Without -z Git quotes paths containing non-ASCII or special bytes
+		// ("\303\274ber.go"), which then failed the source filter and were
+		// silently dropped. NUL-delimited names are raw; an empty record still
+		// separates commits.
+		scanner.Split(splitNUL)
 		var current []string
 		overBudget := false
 		flush := func() {
 			for i := 0; i < len(current) && !overBudget; i++ {
 				for j := i + 1; j < len(current); j++ {
-					if len(counts) >= maxPairs {
-						overBudget = true
-						break
-					}
 					a, b := current[i], current[j]
 					if a > b {
 						a, b = b, a
 					}
-					counts[pair{a, b}]++
+					// The budget bounds unique pairs: counting another
+					// co-change of a known pair never exceeds it.
+					key := pair{a, b}
+					if _, known := counts[key]; !known && len(counts) >= maxPairs {
+						overBudget = true
+						break
+					}
+					counts[key]++
 				}
 			}
 			current = nil
 		}
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+			line := scanner.Text()
 			if line == "" {
 				flush()
 				continue

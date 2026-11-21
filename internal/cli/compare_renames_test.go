@@ -144,3 +144,83 @@ func TestCommitComparisonExactRenamesPreserveAmbiguityAndExclusions(t *testing.T
 		t.Fatal("Git refs changed")
 	}
 }
+
+// With --detect-renames, a removed and an added symbol of the same kind
+// whose name-normalized bodies agree become one "renamed" change, reported
+// with evidence and confidence; unrelated removals and additions stay apart
+// and the default comparison is unchanged.
+func TestCommitComparisonPairsRenamedSymbolsWithConfidence(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	write := func(src string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, "p.go"), []byte(src), 0600); err != nil {
+			t.Fatal(err)
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", "fixture")
+		return compareTestGit(t, root, "rev-parse", "HEAD")
+	}
+	total := func(name, limit, extra string) string {
+		return "func " + name + "(a, b int) int {\n\tsum := a + b\n\tif sum > " + limit + " {\n\t\treturn sum - " + limit + "\n\t}\n" + extra + "\treturn sum * 2\n}\n"
+	}
+	base := write("package p\n\n" + total("Total", "10", "") + total("Score", "99", "") + "func Gone() string { return \"gone\" }\n")
+	head := write("package p\n\n" + total("Sum", "10", "") + total("Rank", "99", "\tsum++\n") + "func Fresh(path string) error { return nil }\n")
+	run := func(args ...string) map[string]any {
+		t.Helper()
+		var output bytes.Buffer
+		command := newRoot()
+		command.SetOut(&output)
+		command.SetErr(&bytes.Buffer{})
+		command.SetArgs(append([]string{"--repo", root, "compare", "--base", base, "--head", head}, args...))
+		if err := command.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		var report map[string]any
+		if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	kinds := func(report map[string]any) map[string]string {
+		got := map[string]string{}
+		for _, raw := range report["changes"].([]any) {
+			change := raw.(map[string]any)
+			got[change["name"].(string)] = change["kind"].(string)
+		}
+		return got
+	}
+	plain := run()
+	if got := kinds(plain); got["Total"] != "removed" || got["Sum"] != "added" || plain["symbol_rename_detection"] != "disabled" || len(plain["symbol_renames"].([]any)) != 0 {
+		t.Fatalf("default comparison changed: %v %v", got, plain["symbol_rename_detection"])
+	}
+	detected := run("--detect-renames")
+	got := kinds(detected)
+	for name, want := range map[string]string{"Sum": "renamed", "Rank": "renamed", "Gone": "removed", "Fresh": "added"} {
+		if got[name] != want {
+			t.Fatalf("%s: %s, want %s (%v)", name, got[name], want, got)
+		}
+	}
+	if _, ok := got["Total"]; ok {
+		t.Fatalf("renamed symbol also reported under its old name: %v", got)
+	}
+	evidence := map[string]string{}
+	for _, raw := range detected["symbol_renames"].([]any) {
+		rename := raw.(map[string]any)
+		from, to := rename["from"].(map[string]any), rename["to"].(map[string]any)
+		confidence := rename["confidence"].(float64)
+		evidence[from["name"].(string)+"->"+to["name"].(string)] = rename["evidence"].(string)
+		if (rename["evidence"] == "identical_body" && confidence != 1) || confidence < 0.7 || len(to["source_hash"].(string)) != 64 {
+			t.Fatalf("unexpected rename evidence: %v", rename)
+		}
+	}
+	if evidence["Total->Sum"] != "identical_body" || evidence["Score->Rank"] != "similar_body" || len(evidence) != 2 || detected["symbol_rename_detection"] != "name_normalized_body" {
+		t.Fatalf("renames %v (%v)", evidence, detected["symbol_rename_detection"])
+	}
+	if strings.Contains(fmt.Sprint(detected), "sum * 2") {
+		t.Fatal("raw source leaked into the comparison report")
+	}
+}

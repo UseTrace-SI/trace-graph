@@ -40,30 +40,95 @@ func revisionSymbols(input []snapshotSymbol) []revisionSymbol {
 	}
 	return result
 }
-func readRevisionSymbols(ctx context.Context, db *sql.DB, repo string) ([]snapshotSymbol, error) {
+func readRevisionSymbols(ctx context.Context, db *sql.DB, repo string) ([]snapshotSymbol, map[string]string, error) {
 	rows, err := db.QueryContext(ctx, `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,65537),COALESCE(c.source_hash,''),COALESCE(c.end_line,s.line) FROM symbols s LEFT JOIN symbol_content c ON c.symbol_id=s.id WHERE s.repo=? ORDER BY s.file,s.line,s.id LIMIT 100001`, repo)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	result := []snapshotSymbol{}
+	shapes := map[string]string{}
 	size := 0
 	for rows.Next() {
 		var s snapshotSymbol
 		if err := rows.Scan(&s.ID, &s.File, &s.Name, &s.Kind, &s.Line, &s.Signature, &s.SourceHash, &s.EndLine); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(s.Signature) > 65536 || len(result) >= 100000 {
-			return nil, fmt.Errorf("revision exceeds 64 KiB per signature or 100000 symbols")
+			return nil, nil, fmt.Errorf("revision exceeds 64 KiB per signature or 100000 symbols")
 		}
-		size += len(s.ID) + len(s.File) + len(s.Name) + len(s.Kind) + len(s.Signature) + len(s.SourceHash) + 128
+		size += len(s.ID) + len(s.File) + len(s.Name) + len(s.Kind) + len(s.Signature) + len(s.SourceHash) + 2*128
 		if size > 32<<20 {
-			return nil, fmt.Errorf("revision symbol metadata exceeds 32 MiB")
+			return nil, nil, fmt.Errorf("revision symbol metadata exceeds 32 MiB")
 		}
+		shapes[s.ID] = graph.SignatureShape(s.Name, s.Signature)
 		s.Signature = fmt.Sprintf("%x", sha256.Sum256([]byte(s.Signature)))
 		result = append(result, s)
 	}
-	return result, rows.Err()
+	return result, shapes, rows.Err()
+}
+
+type symbolRenameReport struct {
+	From revisionSymbol `json:"from"`
+	To   revisionSymbol `json:"to"`
+	graph.SymbolRename
+}
+
+type symbolRenameAmbiguityReport struct {
+	Kind    string           `json:"kind"`
+	Removed []revisionSymbol `json:"removed"`
+	Added   []revisionSymbol `json:"added"`
+}
+
+// pairSymbolRenames replaces each removed/added pair that SymbolRenames
+// matches with one "renamed" change at the removed symbol's position.
+func pairSymbolRenames(differences []symbolChange, base, head graph.RevisionStats, signatures map[string]string) ([]symbolChange, []symbolRenameReport, []symbolRenameAmbiguityReport, bool) {
+	var removed, added []graph.RenameSymbol
+	position := map[string]int{}
+	symbols := map[string]snapshotSymbol{}
+	for i, change := range differences {
+		switch {
+		case change.Kind == "removed" && len(change.Before) == 1:
+			s := change.Before[0]
+			removed = append(removed, graph.RenameSymbol{ID: s.ID, File: s.File, Name: s.Name, Kind: s.Kind, SignatureShape: signatures["base\x00"+s.ID]})
+			position["base\x00"+s.ID], symbols["base\x00"+s.ID] = i, s
+		case change.Kind == "added" && len(change.After) == 1:
+			s := change.After[0]
+			added = append(added, graph.RenameSymbol{ID: s.ID, File: s.File, Name: s.Name, Kind: s.Kind, SignatureShape: signatures["head\x00"+s.ID]})
+			position["head\x00"+s.ID], symbols["head\x00"+s.ID] = i, s
+		}
+	}
+	renames, ambiguities, checked := graph.SymbolRenames(base, head, removed, added)
+	replace, drop := map[int]symbolChange{}, map[int]bool{}
+	reports := []symbolRenameReport{}
+	for _, rename := range renames {
+		from, to := symbols["base\x00"+rename.FromID], symbols["head\x00"+rename.ToID]
+		replace[position["base\x00"+rename.FromID]] = symbolChange{Kind: "renamed", File: to.File, Name: to.Name, Before: []snapshotSymbol{from}, After: []snapshotSymbol{to}}
+		drop[position["head\x00"+rename.ToID]] = true
+		reports = append(reports, symbolRenameReport{From: revisionSymbols([]snapshotSymbol{from})[0], To: revisionSymbols([]snapshotSymbol{to})[0], SymbolRename: rename})
+	}
+	paired := make([]symbolChange, 0, len(differences))
+	for i, change := range differences {
+		if drop[i] {
+			continue
+		}
+		if renamed, ok := replace[i]; ok {
+			change = renamed
+		}
+		paired = append(paired, change)
+	}
+	ambiguous := []symbolRenameAmbiguityReport{}
+	for _, entry := range ambiguities {
+		report := symbolRenameAmbiguityReport{Kind: entry.Kind, Removed: []revisionSymbol{}, Added: []revisionSymbol{}}
+		for _, id := range entry.Removed {
+			report.Removed = append(report.Removed, revisionSymbols([]snapshotSymbol{symbols["base\x00"+id]})...)
+		}
+		for _, id := range entry.Added {
+			report.Added = append(report.Added, revisionSymbols([]snapshotSymbol{symbols["head\x00"+id]})...)
+		}
+		ambiguous = append(ambiguous, report)
+	}
+	return paired, reports, ambiguous, checked
 }
 func compareCmd() *cobra.Command {
 	var base, head string
@@ -78,6 +143,7 @@ func compareCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
+		signatures := map[string]string{}
 		analyze := func(side string) ([]snapshotSymbol, graph.RevisionStats, error) {
 			db, err := store.Open(":memory:")
 			if err != nil {
@@ -88,7 +154,10 @@ func compareCmd() *cobra.Command {
 			if err != nil {
 				return nil, stats, err
 			}
-			symbols, err := readRevisionSymbols(ctx, db, repoPath)
+			symbols, shapes, err := readRevisionSymbols(ctx, db, repoPath)
+			for id, shape := range shapes {
+				signatures[side+"\x00"+id] = shape
+			}
 			return symbols, stats, err
 		}
 		previous, baseStats, err := analyze("base")
@@ -110,13 +179,23 @@ func compareCmd() *cobra.Command {
 			}
 		}
 		differences := compareSymbolsWithRenames(previous, current, renamed)
+		symbolMode := "disabled"
+		symbolRenames, symbolAmbiguities := []symbolRenameReport{}, []symbolRenameAmbiguityReport{}
+		if detectRenames {
+			var similarityChecked bool
+			differences, symbolRenames, symbolAmbiguities, similarityChecked = pairSymbolRenames(differences, baseStats, headStats, signatures)
+			symbolMode = "name_normalized_body"
+			if !similarityChecked {
+				symbolMode = "identical_body_only"
+			}
+		}
 		changes := make([]revisionChange, 0, len(differences))
 		for _, change := range differences {
 			changes = append(changes, revisionChange{Kind: change.Kind, File: change.File, Name: change.Name, Before: revisionSymbols(change.Before), After: revisionSymbols(change.After)})
 		}
 		// Buffer the bounded report so any failure emits no misleading partial JSON.
 		var output compareBuffer
-		if err := json.NewEncoder(&output).Encode(map[string]any{"protocol": 1, "repo": repoPath, "base_commit": pair.BaseCommit, "head_commit": pair.HeadCommit, "policy_hash": pair.PolicyHash, "exclusions": "current_and_both_commits", "analysis": graph.Capabilities(), "source_mode": "local_git_objects", "signatures": "sha256_only", "rename_detection": renameMode, "file_renames": renames, "rename_ambiguities": ambiguous, "base": baseStats, "head": headStats, "changes": changes}); err != nil {
+		if err := json.NewEncoder(&output).Encode(map[string]any{"protocol": 1, "repo": repoPath, "base_commit": pair.BaseCommit, "head_commit": pair.HeadCommit, "policy_hash": pair.PolicyHash, "exclusions": "current_and_both_commits", "analysis": graph.Capabilities(), "source_mode": "local_git_objects", "signatures": "sha256_only", "rename_detection": renameMode, "file_renames": renames, "rename_ambiguities": ambiguous, "symbol_rename_detection": symbolMode, "symbol_renames": symbolRenames, "symbol_rename_ambiguities": symbolAmbiguities, "base": baseStats, "head": headStats, "changes": changes}); err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
@@ -127,7 +206,7 @@ func compareCmd() *cobra.Command {
 	}}
 	cmd.Flags().StringVar(&base, "base", "", "base commit reference (required; resolved once)")
 	cmd.Flags().StringVar(&head, "head", "HEAD", "head commit reference (resolved once)")
-	cmd.Flags().BoolVar(&detectRenames, "detect-renames", false, "pair only unique exact-content relocated files with the same extension")
+	cmd.Flags().BoolVar(&detectRenames, "detect-renames", false, "pair unique exact-content relocated files with the same extension, and renamed symbols by name-normalized body evidence")
 	return cmd
 }
 
