@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func importSummary(imports []lexImport) string {
@@ -72,5 +73,19 @@ func TestExtractRoutes(t *testing.T) {
 				t.Fatalf("routes %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// Statement scans are bounded: an unterminated `use` searched the rest of
+// the file for its semicolon, so many of them were quadratic.
+func TestImportScansAreBounded(t *testing.T) {
+	src := strings.Repeat("use crate::a::b\n", 400000) + "use crate::c::D;\n"
+	start := time.Now()
+	imports := extractImports("rust", newLexSource("rust", src))
+	if elapsed := time.Since(start); elapsed > 20*time.Second {
+		t.Fatalf("400000 unterminated use statements took %v", elapsed)
+	}
+	if len(imports) == 0 || imports[len(imports)-1].imported != "D" {
+		t.Fatalf("terminated import lost: %d imports", len(imports))
 	}
 }

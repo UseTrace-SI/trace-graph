@@ -429,8 +429,8 @@ func pyImports(s *lexSource) []lexImport {
 func rustImports(s *lexSource) []lexImport {
 	var out []lexImport
 	for _, m := range rustUse.FindAllStringIndex(s.mask, -1) {
-		end := strings.IndexByte(s.mask[m[1]:], ';')
-		if end < 0 || end > lexStatementLimit {
+		end := strings.IndexByte(s.mask[m[1]:min(len(s.mask), m[1]+lexStatementLimit)], ';')
+		if end < 0 {
 			continue
 		}
 		rustUseTree(normalizeRustUse(s.mask[m[1]:m[1]+end]), "", m[0], &out, 0)
