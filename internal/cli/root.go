@@ -70,6 +70,9 @@ func newRoot() *cobra.Command {
 
 func Execute() error { return newRoot().Execute() }
 
+// openDB creates or migrates the index and therefore takes the SQLite writer.
+// Only commands that write a generation use it; lookups use readIndex so they
+// neither create an index nor wait behind an indexing transaction.
 func openDB() (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		return nil, err
@@ -104,7 +107,7 @@ func analyzeCmd() *cobra.Command {
 
 func symbolsCmd() *cobra.Command {
 	return &cobra.Command{Use: "symbols", RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}
@@ -132,7 +135,7 @@ func queryCmd() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}
@@ -156,7 +159,7 @@ func queryCmd() *cobra.Command {
 
 func neighborsCmd() *cobra.Command {
 	return &cobra.Command{Use: "neighbors", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}
@@ -202,7 +205,7 @@ func neighborsCmd() *cobra.Command {
 
 func defCmd() *cobra.Command {
 	return &cobra.Command{Use: "def", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		db, err := openDB()
+		db, err := readIndex()
 		if err != nil {
 			return err
 		}

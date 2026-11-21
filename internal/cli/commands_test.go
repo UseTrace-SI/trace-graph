@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/UseTrace-SI/trace-graph/internal/graph"
+	"github.com/UseTrace-SI/trace-graph/internal/store"
 )
 
 func TestSymbolsQueryDefAndVersionCommands(t *testing.T) {
@@ -55,5 +57,67 @@ func TestSymbolsQueryDefAndVersionCommands(t *testing.T) {
 	}
 	if got := run("capabilities"); !strings.Contains(got, `"analyzer"`) {
 		t.Fatalf("capabilities missing analyzer: %s", got)
+	}
+}
+
+// symbols, query, neighbors and def opened the index through the migrating
+// writer path. While a refresh held the SQLite writer they waited for the
+// 30-second busy timeout and then failed with "database is locked"; health
+// and impact already answered from the last committed generation.
+func TestRegressionLookupsDoNotWaitForIndexWriter(t *testing.T) {
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	path := filepath.Join(t.TempDir(), "graph.db")
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package p\nfunc Alpha(){}\nfunc Beta(){Alpha()}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	refresh := newRoot()
+	refresh.SetOut(&bytes.Buffer{})
+	refresh.SetArgs([]string{"--repo", root, "--db", path, "refresh"})
+	if err := refresh.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	writer, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	tx, err := writer.Begin() // BEGIN IMMEDIATE: the same lock an index holds
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("INSERT INTO repo_state(repo,indexed_at) VALUES('in-progress',1)"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"symbols"}, "main.go:2  func  Alpha"},
+		{[]string{"query", "Alpha"}, "Alpha"},
+		{[]string{"def", "Alpha"}, "main.go:2"},
+		{[]string{"neighbors", "Alpha"}, "Beta  main.go:3"},
+	} {
+		done := make(chan struct{})
+		var out bytes.Buffer
+		var runErr error
+		go func() {
+			defer close(done)
+			cmd := newRoot()
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			cmd.SetArgs(append([]string{"--repo", root, "--db", path}, tc.args...))
+			runErr = cmd.Execute()
+		}()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			tx.Rollback() // release the writer so the command can finish
+			<-done
+			t.Fatalf("%v waited behind the index writer", tc.args)
+		}
+		if runErr != nil || !strings.Contains(out.String(), tc.want) {
+			t.Fatalf("%v: %v %q, want %q", tc.args, runErr, &out, tc.want)
+		}
 	}
 }

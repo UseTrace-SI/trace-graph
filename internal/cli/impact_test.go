@@ -168,16 +168,12 @@ func TestTransitiveImpactDeadlineDegradesOnDeepGraph(t *testing.T) {
 }
 
 func TestGraphInspectionNeverCreatesDatabase(t *testing.T) {
-	for _, name := range []string{"health", "impact"} {
+	for _, inspect := range [][]string{{"health"}, {"impact", "A"}, {"symbols"}, {"query", "A"}, {"neighbors", "A"}, {"def", "A"}} {
 		path := filepath.Join(t.TempDir(), "missing.db")
 		cmd := newRoot()
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
-		args := []string{"--repo", t.TempDir(), "--db", path, name}
-		if name == "impact" {
-			args = append(args, "A")
-		}
-		cmd.SetArgs(args)
+		cmd.SetArgs(append([]string{"--repo", t.TempDir(), "--db", path}, inspect...))
 		if err := cmd.Execute(); err == nil {
 			t.Fatal("missing index was accepted")
 		}
