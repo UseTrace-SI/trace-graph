@@ -197,7 +197,7 @@ func analyzeRegexFile(repo, rel, src string, db *indexWriter) (int, error) {
 	db.namespace = pathpkg.Dir(rel)
 	// Classification and the source hash use the masked line. A trailing
 	// "// class marker" comment must not turn an arrow function into a type.
-	lines := strings.Split(maskInventory(src), "\n")
+	lines := strings.Split(maskInventory(langExts[strings.ToLower(filepathExt(rel))], src), "\n")
 	n := 0
 	for i, line := range lines {
 		for _, pat := range symbolPatterns {

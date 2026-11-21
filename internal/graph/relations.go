@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 func scopedID(repo, id string) string { return fmt.Sprintf("%x:%s", sha256.Sum256([]byte(repo)), id) }
@@ -61,9 +62,36 @@ func moduleFromText(data []byte) string {
 	return ""
 }
 
+// rustCharLiteral reports the byte length of a Rust character literal starting
+// at the single quote b[i]. Lifetimes and loop labels ('a, 'static, 'outer:)
+// are not literals: treating their quote as an opening delimiter used to mask
+// every following line up to the next quote, hiding later declarations.
+func rustCharLiteral(b []byte, i int) int {
+	if i+1 >= len(b) {
+		return 0
+	}
+	if b[i+1] == '\\' {
+		// '\n', '\'', '\x7f', '\u{10FFFF}': bounded escape forms.
+		for j := i + 3; j < len(b) && j <= i+12; j++ {
+			if b[j] == '\'' {
+				return j - i + 1
+			}
+			if b[j] == '\n' {
+				return 0
+			}
+		}
+		return 0
+	}
+	_, width := utf8.DecodeRune(b[i+1:])
+	if b[i+1] != '\n' && i+1+width < len(b) && b[i+1+width] == '\'' {
+		return width + 2
+	}
+	return 0
+}
+
 // Mask quoted literals and comments while preserving byte offsets and lines.
 // Inventory matches can then never be declarations pasted into documentation.
-func maskInventory(src string) string {
+func maskInventory(lang, src string) string {
 	b := []byte(src)
 	out := append([]byte(nil), b...)
 	mask := func(i int) {
@@ -72,6 +100,18 @@ func maskInventory(src string) string {
 		}
 	}
 	for i := 0; i < len(b); {
+		if lang == "rust" && b[i] == '\'' {
+			width := rustCharLiteral(b, i)
+			if width == 0 {
+				i++ // lifetime or label
+				continue
+			}
+			for j := 0; j < width; j++ {
+				mask(i)
+				i++
+			}
+			continue
+		}
 		if b[i] == '#' || (b[i] == '/' && i+1 < len(b) && b[i+1] == '/') {
 			for i < len(b) && b[i] != '\n' {
 				mask(i)
