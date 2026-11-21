@@ -154,7 +154,7 @@ type revisionBuffer struct {
 
 func (b *revisionBuffer) Write(p []byte) (int, error) {
 	if len(p) > b.limit-b.Len() {
-		return 0, fmt.Errorf("Git output exceeds comparison budget")
+		return 0, fmt.Errorf("output from Git exceeds the comparison budget")
 	}
 	return b.Buffer.Write(p)
 }
@@ -185,7 +185,7 @@ func resolveCommit(ctx context.Context, root, ref string) (string, error) {
 	}
 	oid := strings.TrimSpace(string(out))
 	if !objectID(oid) {
-		return "", fmt.Errorf("Git returned an invalid commit identity")
+		return "", fmt.Errorf("invalid commit identity returned by Git")
 	}
 	return oid, nil
 }
@@ -253,7 +253,7 @@ func listRevision(ctx context.Context, root, commit string) (revision, error) {
 		}
 		seen[file] = true
 		if len(seen) > 100000 {
-			return result, fmt.Errorf("Git revision exceeds 100000 entries")
+			return result, fmt.Errorf("revision from Git exceeds 100000 entries")
 		}
 		size := int64(-1)
 		if fields[3] != "-" {
@@ -382,11 +382,11 @@ func (b *revisionBatch) read(entry revisionEntry, limit int64) ([]byte, error) {
 	}
 	fields := strings.Fields(string(header))
 	if len(fields) != 3 || fields[0] != entry.oid || fields[1] != "blob" {
-		return nil, fmt.Errorf("Git object is unavailable locally or has an unexpected identity/type")
+		return nil, fmt.Errorf("object from Git is unavailable locally or has an unexpected identity/type")
 	}
 	size, err := strconv.ParseInt(fields[2], 10, 64)
 	if err != nil || size != entry.size || size > limit {
-		return nil, fmt.Errorf("Git object size does not match its tree entry")
+		return nil, fmt.Errorf("object size from Git does not match its tree entry")
 	}
 	data := make([]byte, int(size))
 	if _, err := io.ReadFull(b.output, data); err != nil {
