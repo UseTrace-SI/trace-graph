@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -39,7 +38,7 @@ func walkSourcesContext(ctx context.Context, root string, visit fs.WalkDirFunc) 
 	}
 	var paths []string
 	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
-		cmd := exec.CommandContext(ctx, "git", "-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
+		cmd := localGitCommand(ctx, root, "ls-files", "-z", "--cached", "--others", "--exclude-standard")
 		var output sourceListBuffer
 		cmd.Stdout = &output
 		err := cmd.Run()

@@ -110,14 +110,18 @@ func (c *revisionCmd) failure(err error) error {
 	return fmt.Errorf("local Git comparison command failed (locally available Git objects and a supported Git version may be required): %w: %s", err, detail)
 }
 
-// The explicit flags fail closed on older Git, prohibit lazy network fetches
-// and replacement objects, and avoid index refreshes. No checkout/filter runs.
-func revisionGit(ctx context.Context, root string, args ...string) *revisionCmd {
+// localGitCommand is the only way Graph runs Git. Hooks export GIT_DIR,
+// GIT_WORK_TREE, GIT_INDEX_FILE and GIT_CONFIG_* to their children, so ambient
+// GIT_* variables are dropped rather than allowed to redirect a command to
+// another repository, index or configuration. The explicit flags fail closed
+// on older Git, prohibit lazy network fetches and replacement objects, avoid
+// index refreshes and never run a configured filesystem-monitor command.
+func localGitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
 	flags := []string{"--no-pager"}
 	if gitMeetsVersion(2, 45) {
 		flags = append(flags, "--no-lazy-fetch")
 	}
-	flags = append(flags, "--no-replace-objects", "--no-optional-locks", "-C", root)
+	flags = append(flags, "--no-replace-objects", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", root)
 	cmd := exec.CommandContext(ctx, "git", append(flags, args...)...)
 	for _, value := range os.Environ() {
 		if !strings.HasPrefix(strings.ToUpper(value), "GIT_") {
@@ -125,9 +129,20 @@ func revisionGit(ctx context.Context, root string, args ...string) *revisionCmd 
 		}
 	}
 	cmd.Env = append(cmd.Env, "GIT_TERMINAL_PROMPT=0", "GIT_NO_LAZY_FETCH=1", "GIT_NO_REPLACE_OBJECTS=1", "GIT_OPTIONAL_LOCKS=0")
-	result := &revisionCmd{Cmd: cmd}
-	cmd.Stderr = &result.stderr
 	cmd.WaitDelay = time.Second
+	return cmd
+}
+
+// LocalGitCommand gives read-only CLI history scans the same isolation as
+// indexing and revision comparison.
+func LocalGitCommand(ctx context.Context, root string, args ...string) *exec.Cmd {
+	return localGitCommand(ctx, root, args...)
+}
+
+// No checkout or filter runs for revision comparisons.
+func revisionGit(ctx context.Context, root string, args ...string) *revisionCmd {
+	result := &revisionCmd{Cmd: localGitCommand(ctx, root, args...)}
+	result.Cmd.Stderr = &result.stderr
 	return result
 }
 
