@@ -13,11 +13,19 @@ import (
 
 func scopedID(repo, id string) string { return fmt.Sprintf("%x:%s", sha256.Sum256([]byte(repo)), id) }
 
+// goSymbolID is the unscoped identity of a declaration at a physical line.
+func goSymbolID(rel, name string, line int) string { return rel + ":" + name + ":" + itoa(line) }
+
+// goRelationID is the unscoped identity of a call relation.
+func goRelationID(fromID, callee string, line, column int) string {
+	return fromID + "->" + callee + ":" + itoa(line) + ":" + itoa(column)
+}
+
 func (w *indexWriter) call(repo, rel, fromID, fromName, toName string, line, column int, hint string) {
 	if w.err != nil {
 		return
 	}
-	id := fromID + "->" + toName + ":" + fmt.Sprint(line) + ":" + fmt.Sprint(column)
+	id := goRelationID(fromID, toName, line, column)
 	if _, err := w.Exec("INSERT INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)", id, repo, fromName, toName, "call", rel, line); err != nil {
 		return
 	}

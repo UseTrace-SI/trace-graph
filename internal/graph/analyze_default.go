@@ -74,7 +74,7 @@ var symbolPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?m)^\s*defn\s+([A-Za-z_][A-Za-z0-9_]*)`),
 }
 
-const analyzerVersion = "inventory-v7"
+const analyzerVersion = "inventory-v8"
 
 func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
 
@@ -122,7 +122,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			if d.Recv != nil {
 				kind = "method"
 			}
-			id := rel + ":" + d.Name.Name + ":" + itoa(line)
+			id := goSymbolID(rel, d.Name.Name, line)
 			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 				id, repo, rel, d.Name.Name, kind, line, goSignature(fset, d))
 			db.content(repo, id, src[position(d.Pos()).Offset:position(d.End()).Offset], position(d.End()).Line)
@@ -135,24 +135,14 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			if d.Body == nil {
 				continue
 			}
-			ast.Inspect(d.Body, func(node ast.Node) bool {
-				// A closure's calls belong to the closure, not to the enclosing function.
-				if _, ok := node.(*ast.FuncLit); ok {
-					return false
-				}
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				switch fn := call.Fun.(type) {
+			for _, site := range goCallSites(d.Body) {
+				hint := "unresolved"
+				switch fn := site.fun.(type) {
 				case *ast.Ident:
-					hint := "unresolved"
 					if fn.Obj == nil || fn.Obj.Kind == ast.Fun {
 						hint = "identifier"
 					}
-					db.call(repo, rel, id, d.Name.Name, fn.Name, position(call.Pos()).Line, position(call.Pos()).Column, hint)
 				case *ast.SelectorExpr:
-					hint := "unresolved"
 					if alias, ok := fn.X.(*ast.Ident); ok && alias.Obj == nil {
 						if dir, ok := imports[alias.Name]; ok {
 							hint = "package:" + dir
@@ -163,15 +153,15 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 							hint = "receiver:" + receiver
 						}
 					}
-					db.call(repo, rel, id, d.Name.Name, fn.Sel.Name, position(call.Pos()).Line, position(call.Pos()).Column, hint)
 				}
-				return true
-			})
+				at := position(site.call.Pos())
+				db.call(repo, rel, id, d.Name.Name, site.callee, at.Line, at.Column, hint)
+			}
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
 				if ts, ok := spec.(*ast.TypeSpec); ok {
 					line := position(ts.Pos()).Line
-					id := rel + ":" + ts.Name.Name + ":" + itoa(line)
+					id := goSymbolID(rel, ts.Name.Name, line)
 					db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 						id, repo, rel, ts.Name.Name, "type", line, "type "+ts.Name.Name)
 					db.content(repo, id, src[position(ts.Pos()).Offset:position(ts.End()).Offset], position(ts.End()).Line)
@@ -180,7 +170,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 				if vs, ok := spec.(*ast.ValueSpec); ok {
 					for _, nm := range vs.Names {
 						line := position(nm.Pos()).Line
-						id := rel + ":" + nm.Name + ":" + itoa(line)
+						id := goSymbolID(rel, nm.Name, line)
 						db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 							id, repo, rel, nm.Name, "var", line, "var "+nm.Name)
 						db.content(repo, id, src[position(vs.Pos()).Offset:position(vs.End()).Offset], position(vs.End()).Line)
