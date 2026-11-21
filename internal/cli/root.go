@@ -249,6 +249,16 @@ func maxFilesForPairBudget(maxPairs int) int {
 	return lo
 }
 
+func splitNUL(data []byte, atEOF bool) (int, []byte, error) {
+	if i := bytes.IndexByte(data, 0); i >= 0 {
+		return i + 1, data[:i], nil
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
 func cochangeCmd() *cobra.Command {
 	var maxCount, maxPairs, maxBytes int
 	cmd := &cobra.Command{Use: "cochange", Short: "Report files that change together", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -260,7 +270,7 @@ func cochangeCmd() *cobra.Command {
 		// Stream a bounded log instead of loading all history into memory. The
 		// isolated invocation cannot be redirected to another repository by
 		// ambient GIT_* variables and never fetches missing objects.
-		gitcmd := graph.LocalGitCommand(ctx, repoPath, "log", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
+		gitcmd := graph.LocalGitCommand(ctx, repoPath, "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
 		pipe, err := gitcmd.StdoutPipe()
 		if err != nil {
 			return err
@@ -283,6 +293,11 @@ func cochangeCmd() *cobra.Command {
 		limited := &io.LimitedReader{R: pipe, N: int64(maxBytes) + 1}
 		scanner := bufio.NewScanner(limited)
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		// Without -z Git quotes paths containing non-ASCII or special bytes
+		// ("\303\274ber.go"), which then failed the source filter and were
+		// silently dropped. NUL-delimited names are raw; an empty record still
+		// separates commits.
+		scanner.Split(splitNUL)
 		var current []string
 		overBudget := false
 		flush := func() {
@@ -302,7 +317,7 @@ func cochangeCmd() *cobra.Command {
 			current = nil
 		}
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+			line := scanner.Text()
 			if line == "" {
 				flush()
 				continue

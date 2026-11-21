@@ -142,3 +142,35 @@ func TestRegressionCochangeIgnoresAmbientGitRedirection(t *testing.T) {
 		t.Fatalf("cochange read the wrong repository: %s", &out)
 	}
 }
+
+// git log quoted non-ASCII and special-character paths ("\303\274ber.go"),
+// so they failed the source filter and vanished from cochange.
+func TestRegressionCochangeKeepsQuotedPaths(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	for i := 0; i < 2; i++ {
+		for _, file := range []string{"über.go", `back\slash.go`, "plain.go"} {
+			if err := os.WriteFile(filepath.Join(root, file), []byte(fmt.Sprintf("package p\n// %d\n", i)), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	var out bytes.Buffer
+	cmd := newRoot()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--repo", root, "cochange"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("%s: %v", &out, err)
+	}
+	for _, want := range []string{"2  plain.go  <->  über.go", `2  back\slash.go  <->  plain.go`, `2  back\slash.go  <->  über.go`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q in:\n%s", want, &out)
+		}
+	}
+}
