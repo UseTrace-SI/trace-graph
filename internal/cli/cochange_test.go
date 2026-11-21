@@ -104,3 +104,41 @@ func TestCochangeLargeCommitWithinDefaultPairBudget(t *testing.T) {
 		t.Fatalf("default cochange failed on a large commit: %v\n%s", err, &out)
 	}
 }
+
+// Hooks export GIT_DIR and GIT_WORK_TREE. cochange inherited them and
+// reported another repository's history as this repository's coupling.
+func TestRegressionCochangeIgnoresAmbientGitRedirection(t *testing.T) {
+	history := func(files ...string) string {
+		t.Helper()
+		root, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		compareTestGit(t, root, "init", "-q")
+		for i := 0; i < 2; i++ {
+			for _, file := range files {
+				if err := os.WriteFile(filepath.Join(root, file), []byte(fmt.Sprintf("package p\n// %d\n", i)), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			compareTestGit(t, root, "add", "-A")
+			compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+		}
+		return root
+	}
+	root := history("a.go", "b.go")
+	foreign := history("foreign_c.go", "foreign_d.go")
+	t.Setenv("GIT_DIR", filepath.Join(foreign, ".git"))
+	t.Setenv("GIT_WORK_TREE", foreign)
+	var out bytes.Buffer
+	cmd := newRoot()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--repo", root, "cochange"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("%s: %v", &out, err)
+	}
+	if !strings.Contains(out.String(), "a.go  <->  b.go") || strings.Contains(out.String(), "foreign") {
+		t.Fatalf("cochange read the wrong repository: %s", &out)
+	}
+}

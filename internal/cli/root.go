@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -258,8 +257,10 @@ func cochangeCmd() *cobra.Command {
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 		defer cancel()
-		// Stream a bounded log instead of loading all history into memory.
-		gitcmd := exec.CommandContext(ctx, "git", "-C", repoPath, "log", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
+		// Stream a bounded log instead of loading all history into memory. The
+		// isolated invocation cannot be redirected to another repository by
+		// ambient GIT_* variables and never fetches missing objects.
+		gitcmd := graph.LocalGitCommand(ctx, repoPath, "log", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
 		pipe, err := gitcmd.StdoutPipe()
 		if err != nil {
 			return err
