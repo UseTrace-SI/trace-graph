@@ -29,8 +29,13 @@ func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
 			return err
 		}
 		r.files[path] = true
-		key := suffixKey(path)
-		r.suffixes[key] = append(r.suffixes[key], path)
+		// A lookup path of one component matches by base name, a longer one
+		// by its last two components; index each file under both keys.
+		base := pathpkg.Base(path)
+		r.suffixes[base] = append(r.suffixes[base], path)
+		if key := suffixKey(path); key != base {
+			r.suffixes[key] = append(r.suffixes[key], path)
+		}
 	}
 	if err := closeRows(rows); err != nil {
 		return err

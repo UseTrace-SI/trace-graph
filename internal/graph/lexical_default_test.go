@@ -211,3 +211,14 @@ func TestLexicalAnalysisOfLargeFilesIsLinear(t *testing.T) {
 	}
 	t.Logf("%d functions analyzed in %v", functions, elapsed)
 }
+
+// A single-component absolute Python module (`from tool import run`, with
+// scripts/ on the import path) resolves to the only file of that name.
+func TestRegressionPythonSingleComponentModuleResolves(t *testing.T) {
+	db, root := goTypeFixture(t, map[string]string{
+		"scripts/tool.py":      "def run():\n    pass\n",
+		"scripts/tool_test.py": "from tool import run\n\ndef test_run():\n    run()\n",
+	})
+	expectEdges(t, goEdges(t, db, root, "call"), map[string]goEdge{"test_run->run@4": lexEdge("scripts/tool.py:run:1")})
+	expectEdges(t, goEdges(t, db, root, "import"), map[string]goEdge{"scripts/tool_test.py->run@1": lexEdge("scripts/tool.py:run:1")})
+}
