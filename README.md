@@ -20,9 +20,9 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 - `trace-graph analyze [--repo .]` — index the current checkout in place.
 - `trace-graph symbols` — list indexed symbols as `file:line kind name`.
 - `trace-graph query <term>` — literal-word FTS search across symbols.
-- `trace-graph neighbors <symbol-or-id>` — show definitions and direct callers.
-- `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--limit 200] [--json]` — transitive resolved-call report.
-- `trace-graph health` — index time, coverage and resolved/unresolved call counts as JSON.
+- `trace-graph neighbors <symbol-or-id>` — show definitions and direct callers (calls and interface dispatch).
+- `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--limit 200] [--include-dispatch] [--json]` — transitive resolved-call report.
+- `trace-graph health` — index time, coverage, resolved/unresolved call counts, call resolution, relationship kinds and the Go type pass as JSON.
 - `trace-graph snapshot [--limit 1000000]` — stream a versioned `trace.graph/v1` NDJSON snapshot.
 - `trace-graph changes --base snapshot.ndjson` — compare a complete snapshot with the current index.
 - `trace-graph compare --base REF [--head REF] [--detect-renames]` — compare two local Git commits without changing the checkout.
@@ -34,7 +34,11 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 
 All analysis and inspection commands remain repository-scoped. `cochange` uses
 the same supported-file and exclusion policy as indexing, scans at most
-`--max-count` commits, and refuses to exceed `--max-pairs` or `--max-log-bytes`.
+`--max-count` commits, and refuses to exceed `--max-pairs` unique file pairs or
+`--max-log-bytes`. It reads the log NUL-delimited, so non-ASCII and
+special-character paths are kept. `symbols`, `query`, `neighbors` and `def`
+open the index read-only like `health` and `impact`: they never create or
+migrate it and answer from the last committed generation while a refresh runs.
 
 ## Build
 `go build ./...`
@@ -44,6 +48,8 @@ the same supported-file and exclusion policy as indexing, scans at most
 Default database paths are anchored to `--repo`. New initialized Trace projects use `.trace/graph/graph.db`; pre-existing `.trace-graph/graph.db` is retained, and `--db` remains explicit. With the binary on the CLI daemon's `PATH`, Graph refreshes after completed turns/sessions and CLI recovery. `trace context` and MCP `get_context` include repository-scoped symbols, relationships, and index time. Lookup never creates an index. Graph analyzes the current checkout; derived databases are rebuilt locally.
 
 Git checkouts index tracked and untracked non-ignored sources. Generated Trace state, dependency trees and secret paths are excluded even if tracked. Non-Git source directories remain supported. Newly ignored files are removed on the next successful generation.
+
+Every Git command Graph runs (indexing, `cochange`, `compare`) drops ambient `GIT_*` variables, so a hook's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` or `GIT_CONFIG_*` cannot redirect it to another repository, index or configuration, and runs with `core.fsmonitor` disabled, lazy fetches prohibited, replacement objects ignored and optional locks off. Source reads are anchored to the repository root: a source beneath a directory that was replaced by a symlink is skipped (Git treats it as deleted), an open cannot leave the root, does not block on a FIFO and must yield the regular file that was checked.
 
 Write transactions reserve the SQLite writer before reading cached generations. Concurrent first opens retry transient WAL setup contention, and schema upgrades run under one write transaction so a second opener cannot clear a newly written generation.
 
@@ -62,43 +68,92 @@ Tree-sitter vet, race tests, and 100-run regressions are also included.
 
 Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. Local embeddings are hashed word projections rather than a learned semantic model.
 
-Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused.
+Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused. Per-file relation deletes use a `(repo, file)` index, so a cold index grows with the repository rather than with files × relations.
+
+Package-wide Go type checking retains at most 32 MiB of Go source per index (a larger checkout keeps syntax evidence for every Go call), stops starting packages after 20 seconds or 15 seconds before the index deadline (a pass cut short is recorded as partial and completed by the next refresh, even with no changed file), records at most 32 dispatch edges per interface call and 100,000 per repository, and never loads packages outside the analyzed module. A refresh with no changed or deleted file and a complete previous pass skips resolution. Measured on this machine: trace-cli (1.3 MB of Go) indexes cold in 1.5 s; the Go tree's `cmd` (29 MB, 1,472 files) in 29 s, of which the type pass takes about 4 s.
 
 Production builds select Go 1.27.4 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26; release builds reject a different compiler. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
 
 ## Analysis quality and confidence
 
 `trace-graph capabilities` returns JSON for the analyzer actually compiled into
-the executable. Default builds use Go AST analysis and lexical inventory for
-other languages, including JS module extensions and simple TypeScript arrow
-functions. Comment/string declarations are masked during lexical inventory.
-This is not a type-checked language-service graph.
+the executable (at most eight limitations, which the Trace CLI enforces).
+Relationship kinds are `call`, `implements`, `dispatch`, `extends`, `import`
+and `route`; resolutions are `typed` (Go type checker), `lexical` (syntax
+evidence), `dynamic` (interface or function-value dispatch, target unknown),
+`module` (an import resolved to a repository file but not to a declaration)
+and `unresolved`. Unresolved and dynamic targets are never guessed.
 
-Go calls resolve to unique package-function identities, module-local imported
-functions, explicit local receiver methods, same-file type aliases and receivers
-from literal, copied-value or locally typed-conversion initializers when unambiguous. Source
-symbol IDs, optional target IDs and `lexical` or `unresolved` status are returned
-with relationships. Resolution follows bounded syntax evidence, with tests checked
-against Go's type checker. Dynamic dispatch, cross-file aliases, factory returns,
-package-shadowable builtins such as `new`, promoted embedded methods and ambiguous
-targets stay unresolved. Context selects edges by symbol identity,
-preventing same-name functions in different packages from sharing callers.
-Tree-sitter builds report observed calls and unresolved targets explicitly.
+Go: after the per-file pass, every package of the analyzed module is
+type-checked together with `go/types` (standard library only). Module packages
+are imported from the analyzed source; the standard library and dependencies
+are never loaded and their types are unknown. Files are matched for the host
+platform without cgo; `testdata`, `_`/`.` directories and directories with more
+than one package are skipped, and in-package and external tests are checked.
+A call resolves `typed` through variable and factory-return types, cross-file
+and import aliases, promoted methods and fields, and generic instantiations.
+Anything depending on an unknown type keeps its syntax result, including a
+promoted method that an embedded field of unknown type could shadow, and
+duplicate declarations or test-file targets of non-test callers are never
+targets. Module types satisfying a module interface get `implements` edges
+(interfaces whose method set involves unknown types are skipped, because
+unknown types compare identical); an interface call gets `dispatch` edges to
+its possible module implementations. Syntax evidence (unique package
+functions, module-local import calls and receivers from declarations,
+literals and local conversions, package-level types only) remains the result
+for files the pass does not check. On trace-cli every `typed` edge agreed with
+a full type check using the real standard library and dependencies (2,448
+edges, none wrong, no in-repository target missed). Calls inside closures are
+omitted from enclosing-function calls. HTTP routes registered with net/http or
+gorilla `HandleFunc`/`Handle` (Go 1.22 `"GET /path"` patterns give the method)
+and chi, gin and echo verb methods with a literal path become `route` edges
+whose handler resolves like a call. Positions are physical lines even under
+`//line` directives, and blank identifiers are not symbols.
+
+TypeScript/JavaScript, Python, Rust and Java use declaration-aware lexical
+analysis of masked source (comments and strings blanked per language; it is
+not a type checker). Declarations get extents and containers, so source
+hashes cover whole bodies (comments masked, whitespace collapsed, literals
+kept), and calls are attributed to the innermost enclosing function. Imports
+resolve to repository files: relative JS/TS specifiers (including `./x.js`
+for a `./x.ts` source), Python relative and unique absolute modules, Rust
+`crate::`/`self::`/`super::` paths and `mod` files, and Java class files.
+Package names and path aliases stay unresolved. A call, route handler or
+`extends`/`implements` reference resolves only to exactly one declaration: a
+module-level declaration of the same file, an explicitly imported one, a
+member reached through a module binding or an imported or same-file type
+(static members; any for Python classes), a statically bound member of the
+caller's Java class, or a Java class of the same package. Names bound as
+parameters or locals of the caller, reassigned module-level bindings, and
+calls on `this`/`self` or on expressions never resolve. Express/Hono-style
+`obj.method('/path', ..., handler)` calls and FastAPI/Flask decorators become
+routes; an inline handler resolves only when it delegates to a single call,
+optionally inside one middleware call. Other languages use lexical inventory.
+
+Tree-sitter builds report observed calls and unresolved targets explicitly,
+name declarations from an explicit per-grammar list, and record the same
+imports and routes; their symbols are not import or handler targets except
+decorated Python route functions.
 
 Graph honors the same project-root `.traceignore` syntax as CLI capture. An
 excluded file's old derived symbols disappear on the next successful generation.
-This upgrade invalidates the previous derived index once; run `refresh` to rebuild.
+This upgrade (analyzer `inventory-v8`, Tree-sitter `treesitter-v5`) re-analyzes
+every file once on the next refresh; existing data is kept until then.
 
 ## Impact, health and graph snapshots
 
-`impact` walks resolved symbol identities transitively, with cycle detection,
+`impact` walks resolved call edges (and, with `--include-dispatch`, interface
+dispatch edges) transitively, with cycle detection,
 repository isolation, a two-second deadline, depth 1–20 and at most 1,000 returned
 symbols. Ambiguous names require an explicit ID; capped results report
 `truncated: true`. If the deadline expires mid-walk, the command returns the
 best-effort symbols gathered so far with `truncated: true` and
 `deadline_exceeded: true` rather than failing. Unresolved observations are
 never guessed into graph edges.
-`health` reports index time, file/symbol counts and resolved/unresolved call counts.
+`health` reports index time, file/symbol counts, resolved/unresolved counts of
+`call` relations, `call_resolution` by resolution, `relations` by kind and the
+stored `go_types` pass record (status, packages, files, type errors, typed and
+dynamic calls, implements and dispatch edges).
 
 `snapshot` streams versioned `trace.graph/v1` NDJSON from one read transaction,
 including parser limitations, symbol source hashes, relationships and a completion
@@ -148,5 +203,21 @@ Duplicate-content candidates appear in `rename_ambiguities` with matching counts
 and their symbols keep ordinary added/removed changes. Copies and edited moves
 are not paired. Different extensions are not paired even when their bytes match.
 This is content evidence of relocation, not proof of author intent or Git history.
-The option defaults off, retaining ordinary comparison classifications. Symbol
-renaming, similarity-based edited moves and type-aware analysis remain open.
+The option defaults off, retaining ordinary comparison classifications.
+
+`--detect-renames` also pairs renamed symbols (`symbol_rename_detection`:
+`name_normalized_body`). Declarations with body extents (Go, the
+declaration-aware lexical languages, Tree-sitter) are compared by their
+comment-masked tokens with their own name replaced. A removed and an added
+symbol of the same kind and a different name pair as `identical_body` when
+that body is unique on both sides (confidence 1, or 0.75 under 12 tokens), or
+as `similar_body` when each is the other's best match with an estimated token
+trigram similarity of at least 0.7 and a 0.1 margin (confidence is that
+similarity, scaled by 0.9 when the name-normalized signature differs). Each pair
+becomes one `renamed` change and a `symbol_renames` entry with both locations,
+hashes, evidence, confidence, body similarity and signature match; identical
+bodies that could pair more than one way appear in `symbol_rename_ambiguities`
+and keep their changes. Above 250,000 candidate pairs only identical bodies are
+paired (`identical_body_only`). This is evidence of a rename, not proof of
+intent. Similarity-based edited file moves and type-aware revision analysis
+remain open.
