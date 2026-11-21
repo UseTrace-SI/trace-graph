@@ -159,3 +159,30 @@ func TestLexicalReassignedBindingsAreNotTargets(t *testing.T) {
 		"use->plain@11":         lexEdge("mod.py:plain:6"),
 	})
 }
+
+// Comment syntax depends on the language: Python's // is floor division and
+// JavaScript's # starts a private member. Treating both as comments hid the
+// rest of the line, so later calls and private methods were lost. Content
+// hashes keep string literals, so a literal-only edit is a source change.
+func TestRegressionLexicalCommentSyntaxIsPerLanguage(t *testing.T) {
+	db, root := goTypeFixture(t, map[string]string{
+		"calc.py": "def half(n):\n    return n // 2 + twice(n)\n\ndef twice(n):\n    return n * 2  # doubled\n",
+		"box.js":  "class Box {\n  #count = 0;\n  #bump() { this.#count++; tick(); }\n  open() { return 'x'; }\n}\nfunction tick() {}\n",
+	})
+	expectEdges(t, goEdges(t, db, root, "call"), map[string]goEdge{
+		"half->twice@2": lexEdge("calc.py:twice:4"),
+		"#bump->tick@3": lexEdge("box.js:tick:6"),
+	})
+	var before string
+	if err := db.QueryRow("SELECT c.source_hash FROM symbol_content c JOIN symbols s ON s.id=c.symbol_id WHERE s.repo=? AND s.name='open'", root).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	revisionTestWrite(t, root, "box.js", "class Box {\n  #count = 0;\n  #bump() { this.#count++; tick(); }\n  open() { return 'y'; }\n}\nfunction tick() {}\n")
+	if _, err := AnalyzeRepo(root, db); err != nil {
+		t.Fatal(err)
+	}
+	var after string
+	if err := db.QueryRow("SELECT c.source_hash FROM symbol_content c JOIN symbols s ON s.id=c.symbol_id WHERE s.repo=? AND s.name='open'", root).Scan(&after); err != nil || after == before {
+		t.Fatalf("string-literal edit kept the body hash: %v", err)
+	}
+}

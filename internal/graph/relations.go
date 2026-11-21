@@ -113,16 +113,42 @@ func rustCharLiteral(b []byte, i int) int {
 	return 0
 }
 
+// Comment syntax by language. Python's // is floor division and a
+// JavaScript or Rust # starts a private member or an attribute, so treating
+// both forms as comments everywhere blanked the rest of such lines. Other
+// languages keep both forms.
+var (
+	hashCommentOnly  = wordSetShared("python ruby bash zsh r perl elixir yaml julia")
+	slashCommentOnly = wordSetShared("go javascript typescript rust java c cpp csharp kotlin swift scala dart groovy zig protobuf objectivec cue")
+)
+
+func wordSetShared(words string) map[string]bool {
+	set := map[string]bool{}
+	for _, word := range strings.Fields(words) {
+		set[word] = true
+	}
+	return set
+}
+
 // Mask quoted literals and comments while preserving byte offsets and lines.
 // Inventory matches can then never be declarations pasted into documentation.
-func maskInventory(lang, src string) string {
+func maskInventory(lang, src string) string { return maskSource(lang, src, false) }
+
+// maskSource masks comments and, unless keepStrings, string literals. Kept
+// literals are still skipped, so comment markers inside them stay code.
+func maskSource(lang, src string, keepStrings bool) string {
 	b := []byte(src)
 	out := append([]byte(nil), b...)
-	mask := func(i int) {
+	comment := func(i int) {
 		if out[i] != '\n' && out[i] != '\r' {
 			out[i] = ' '
 		}
 	}
+	literal := comment
+	if keepStrings {
+		literal = func(int) {}
+	}
+	hashComments, slashComments := !slashCommentOnly[lang], !hashCommentOnly[lang]
 	for i := 0; i < len(b); {
 		if lang == "rust" && b[i] == '\'' {
 			width := rustCharLiteral(b, i)
@@ -131,30 +157,30 @@ func maskInventory(lang, src string) string {
 				continue
 			}
 			for j := 0; j < width; j++ {
-				mask(i)
+				literal(i)
 				i++
 			}
 			continue
 		}
-		if b[i] == '#' || (b[i] == '/' && i+1 < len(b) && b[i+1] == '/') {
+		if (hashComments && b[i] == '#') || (slashComments && b[i] == '/' && i+1 < len(b) && b[i+1] == '/') {
 			for i < len(b) && b[i] != '\n' {
-				mask(i)
+				comment(i)
 				i++
 			}
 			continue
 		}
-		if b[i] == '/' && i+1 < len(b) && b[i+1] == '*' {
-			mask(i)
-			mask(i + 1)
+		if slashComments && b[i] == '/' && i+1 < len(b) && b[i+1] == '*' {
+			comment(i)
+			comment(i + 1)
 			i += 2
 			for i < len(b) {
 				if b[i] == '*' && i+1 < len(b) && b[i+1] == '/' {
-					mask(i)
-					mask(i + 1)
+					comment(i)
+					comment(i + 1)
 					i += 2
 					break
 				}
-				mask(i)
+				comment(i)
 				i++
 			}
 			continue
@@ -166,27 +192,27 @@ func maskInventory(lang, src string) string {
 				width = 3
 			}
 			for j := 0; j < width; j++ {
-				mask(i)
+				literal(i)
 				i++
 			}
 			for i < len(b) {
 				if b[i] == '\\' {
-					mask(i)
+					literal(i)
 					i++
 					if i < len(b) {
-						mask(i)
+						literal(i)
 						i++
 					}
 					continue
 				}
 				if b[i] == quote && (width == 1 || (i+2 < len(b) && b[i+1] == quote && b[i+2] == quote)) {
 					for j := 0; j < width; j++ {
-						mask(i)
+						literal(i)
 						i++
 					}
 					break
 				}
-				mask(i)
+				literal(i)
 				i++
 			}
 			continue

@@ -111,12 +111,14 @@ func lexDeclarationLanguage(lang string) bool { _, ok := lexPatterns[lang]; retu
 func analyzeLexicalFile(lang, repo, rel, src string, db *indexWriter) (int, error) {
 	s := newLexSource(lang, src)
 	decls := lexDeclarations(lang, s)
+	// Hashes keep string literals: a literal-only edit is a source change.
+	hashText := maskSource(lang, src, true)
 	for _, d := range decls {
 		d.id = goSymbolID(rel, d.name, d.line)
 		db.namespace = lexNamespace(rel, d.container, d.static)
 		db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 			d.id, repo, rel, d.name, d.kind, d.line, d.signature)
-		db.content(repo, d.id, lexContent(s, d), d.endLine)
+		db.content(repo, d.id, lexContent(s, hashText, d), d.endLine)
 	}
 	db.namespace = lexNamespace(rel, "", false)
 	for _, d := range decls {
@@ -153,9 +155,9 @@ func lexNamespace(rel, container string, static bool) string {
 	return "lex:" + rel + "#" + container
 }
 
-// lexContent is the masked declaration and body with whitespace runs
-// collapsed, so comment and formatting edits do not change its hash.
-func lexContent(s *lexSource, d *lexDecl) []byte {
+// lexContent is the comment-masked declaration and body with whitespace
+// runs collapsed, so comment and formatting edits do not change its hash.
+func lexContent(s *lexSource, hashText string, d *lexDecl) []byte {
 	end := len(s.mask)
 	if d.bodyEnd > 0 {
 		end = d.bodyEnd
@@ -165,7 +167,7 @@ func lexContent(s *lexSource, d *lexDecl) []byte {
 	if end < d.offset {
 		end = d.offset
 	}
-	return []byte(strings.Join(strings.Fields(s.mask[d.offset:end]), " "))
+	return []byte(strings.Join(strings.Fields(hashText[d.offset:end]), " "))
 }
 
 // lexDeclarations finds declarations line by line. Member patterns apply
