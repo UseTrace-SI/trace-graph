@@ -70,7 +70,7 @@ Ordinary search text is interpreted as literal words, including punctuation. Con
 
 Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused. Per-file relation deletes use a `(repo, file)` index, so a cold index grows with the repository rather than with files × relations.
 
-Package-wide Go type checking retains at most 32 MiB of Go source per index (a larger checkout keeps syntax evidence for every Go call), stops starting packages after 20 seconds or 15 seconds before the index deadline (a pass cut short is recorded as partial and completed by the next refresh, even with no changed file), records at most 32 dispatch edges per interface call and 100,000 per repository, and never loads packages outside the analyzed module. A refresh with no changed or deleted file and a complete previous pass skips resolution. Measured on this machine: trace-cli (1.3 MB of Go) indexes cold in about 1.4 s; the Go tree's `cmd` (29 MB of Go in 1,472 files) in about 25 s with 0.6 GB peak memory, of which the type pass takes about 4 s. Lexical analysis is linear in file size (a 568 KB JavaScript file with 6,000 functions indexes in under 2 s).
+Package-wide Go type checking retains at most 32 MiB of Go source per index (a larger checkout keeps syntax evidence for every Go call), stops starting packages after 20 seconds or 15 seconds before the index deadline (a pass cut short is recorded as partial and completed by the next refresh, even with no changed file), records at most 32 dispatch edges per interface call and 100,000 per repository, and never loads packages outside the analyzed module. A refresh with no changed or deleted file and a complete previous pass skips resolution. Measured on this machine: trace-cli (1.3 MB of Go) indexes cold in about 1.5 s; the Go tree's `cmd` (29 MB of Go in 1,472 files) in about 25–27 s with 0.5–0.6 GB peak memory, of which the type pass takes about 4 s. Lexical analysis is linear in file size: body searches are bounded per declaration and brace bodies matched once per file (a 568 KB JavaScript file with 6,000 functions indexes in under 2 s; 40,000 semicolon-less type aliases analyze in under a second).
 
 Production builds select Go 1.27.4 to include the patched certificate verifier. CI pins this compiler and runs Govulncheck. The language version remains Go 1.26; release builds reject a different compiler. Existing runtime dependencies are pinned to their reviewed updates in go.mod/go.sum.
 
@@ -92,13 +92,20 @@ platform without cgo; `testdata`, `_`/`.` directories and directories with more
 than one package are skipped, and in-package and external tests are checked.
 A call resolves `typed` through variable and factory-return types, cross-file
 and import aliases, promoted methods and fields, and generic instantiations.
-Anything depending on an unknown type keeps its syntax result, including a
-promoted method that an embedded field of unknown type could shadow, and
-duplicate declarations or test-file targets of non-test callers are never
-targets. Module types satisfying a module interface get `implements` edges
-(interfaces whose method set involves unknown types are skipped, because
-unknown types compare identical); an interface call gets `dispatch` edges to
-its possible module implementations. Syntax evidence (unique package
+Anything depending on an unknown type keeps its syntax result, and duplicate
+declarations or test-file targets of non-test callers are never targets. A
+promoted method is typed only when the receiver and every type embedded at a
+shallower depth are fully known: of known type and underlying type, with a
+complete interface method set, and declared in a package whose directory holds
+no Go file the pass did not see (excluded by policy or `.gitignore`,
+symlinked, unreadable or unparsable; only entry names are read, and
+`go_types.incomplete_packages` counts them). Fully known module types
+satisfying a module interface get `implements` edges (interfaces whose method
+set involves unknown types are skipped, because unknown types compare
+identical). An interface call through a static named interface, or a named
+interface field embedded on the selection path, gets `dispatch` edges to its
+possible non-test module implementations; calls through unnamed interfaces or
+type parameters get none. Syntax evidence (unique package
 functions, module-local import calls and receivers from declarations,
 literals and local conversions, package-level types only) remains the result
 for files the pass does not check. On trace-cli every `typed` edge agreed with
@@ -111,10 +118,11 @@ whose handler resolves like a call. Positions are physical lines even under
 `//line` directives, and blank identifiers are not symbols.
 
 TypeScript/JavaScript, Python, Rust and Java use declaration-aware lexical
-analysis of masked source (comments and strings blanked per language; it is
-not a type checker). Declarations get extents and containers, so source
-hashes cover whole bodies (comments masked, whitespace collapsed, literals
-kept), and calls are attributed to the innermost enclosing function. Imports
+analysis of masked source (comments, strings and JavaScript regular
+expression literals blanked per language; it is not a type checker).
+Declarations get extents and containers, so source hashes cover whole bodies
+(comments masked, whitespace collapsed, literals kept), and calls are
+attributed to the innermost enclosing function. Imports
 resolve to repository files: relative JS/TS specifiers (including `./x.js`
 for a `./x.ts` source), Python relative and unique absolute modules, Rust
 `crate::`/`self::`/`super::` paths and `mod` files, and Java class files.
@@ -123,9 +131,15 @@ Package names and path aliases stay unresolved. A call, route handler or
 module-level declaration of the same file, an explicitly imported one, a
 member reached through a module binding or an imported or same-file type
 (static members; any for Python classes), a statically bound member of the
-caller's Java class, or a Java class of the same package. Names bound as
-parameters or locals of the caller, reassigned module-level bindings, and
-calls on `this`/`self` or on expressions never resolve. Express/Hono-style
+caller's Java class, or a Java class of the same package. JavaScript and
+TypeScript named and namespace imports resolve only to exported declarations
+(`export`, export lists, `export default`, CommonJS `exports.f = f` and
+shorthand `module.exports = { f }`); default imports and `require` namespace
+values have unknown members; Python `import a.b` binds the package `a`. Names
+bound as parameters or locals of the caller or of any enclosing function,
+names a file both imports and declares, reassigned module-level bindings,
+calls on `this`/`self` or on expressions, and names inside Rust inline `mod`
+blocks (except `crate::` paths) never resolve. Express/Hono-style
 `obj.method('/path', ..., handler)` calls and FastAPI/Flask decorators become
 routes; an inline handler resolves only when it delegates to a single call,
 optionally inside one middleware call. Other languages use lexical inventory.
@@ -152,8 +166,8 @@ best-effort symbols gathered so far with `truncated: true` and
 never guessed into graph edges.
 `health` reports index time, file/symbol counts, resolved/unresolved counts of
 `call` relations, `call_resolution` by resolution, `relations` by kind and the
-stored `go_types` pass record (status, packages, files, type errors, typed and
-dynamic calls, implements and dispatch edges).
+stored `go_types` pass record (status, packages, incomplete packages, files,
+type errors, typed and dynamic calls, implements and dispatch edges).
 
 `snapshot` streams versioned `trace.graph/v1` NDJSON from one read transaction,
 including parser limitations, symbol source hashes, relationships and a completion
@@ -218,6 +232,7 @@ becomes one `renamed` change and a `symbol_renames` entry with both locations,
 hashes, evidence, confidence, body similarity and signature match; identical
 bodies that could pair more than one way appear in `symbol_rename_ambiguities`
 and keep their changes. Above 250,000 candidate pairs only identical bodies are
-paired (`identical_body_only`). This is evidence of a rename, not proof of
-intent. Similarity-based edited file moves and type-aware revision analysis
-remain open.
+paired (`identical_body_only`). A name and kind present on both sides is the
+same symbol moved or edited and never takes part. This is evidence of a
+rename, not proof of intent. Similarity-based edited file moves and type-aware
+revision analysis remain open.
