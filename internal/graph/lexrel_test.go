@@ -82,7 +82,7 @@ func TestImportScansAreBounded(t *testing.T) {
 	src := strings.Repeat("use crate::a::b\n", 400000) + "use crate::c::D;\n"
 	start := time.Now()
 	imports := extractImports("rust", newLexSource("rust", src))
-	if elapsed := time.Since(start); elapsed > 20*time.Second {
+	if elapsed := time.Since(start); elapsed > 20*time.Second*raceSlowdown {
 		t.Fatalf("400000 unterminated use statements took %v", elapsed)
 	}
 	if len(imports) == 0 || imports[len(imports)-1].imported != "D" {

@@ -206,7 +206,7 @@ func TestLexicalAnalysisOfLargeFilesIsLinear(t *testing.T) {
 	if len(decls) != functions || len(calls) != 2*functions {
 		t.Fatalf("%d declarations and %d calls", len(decls), len(calls))
 	}
-	if elapsed > 30*time.Second {
+	if elapsed > 30*time.Second*raceSlowdown {
 		t.Fatalf("lexical analysis of %d functions took %v", functions, elapsed)
 	}
 	t.Logf("%d functions analyzed in %v", functions, elapsed)
