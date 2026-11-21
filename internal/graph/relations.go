@@ -32,6 +32,22 @@ func (w *indexWriter) call(repo, rel, fromID, fromName, toName string, line, col
 	_, _ = w.write("INSERT INTO relation_targets(relation_id,from_id,namespace,hint) VALUES(?,?,?,?) ON CONFLICT(relation_id) DO NOTHING", scopedID(repo, id), scopedID(repo, fromID), w.namespace, hint)
 }
 
+// relation writes a relationship other than a Go call. fromID is empty for
+// module-level relationships such as imports.
+func (w *indexWriter) relation(repo, rel, id, fromID, fromName, toName, kind string, line int, hint string) {
+	if w.err != nil {
+		return
+	}
+	if _, err := w.Exec("INSERT INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)", id, repo, fromName, toName, kind, rel, line); err != nil {
+		return
+	}
+	from := ""
+	if fromID != "" {
+		from = scopedID(repo, fromID)
+	}
+	_, _ = w.write("INSERT INTO relation_targets(relation_id,from_id,namespace,hint) VALUES(?,?,?,?) ON CONFLICT(relation_id) DO NOTHING", scopedID(repo, id), from, w.namespace, hint)
+}
+
 // Resolve unique package functions and explicitly declared local receiver
 // methods. Dynamic dispatch and ambiguous names remain unresolved observations.
 func resolveCalls(ctx context.Context, tx *sql.Tx, repo string) error {
