@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -95,5 +96,38 @@ INSERT INTO symbols VALUES('legacy','.','gone.go','Old','func',1,'func Old');`)
 	}
 	if err := db.QueryRow("SELECT count(*) FROM symbol_fts WHERE symbol_fts MATCH 'stale'").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("legacy FTS corruption survived: %d %v", n, err)
+	}
+}
+
+// Reindexing deletes each changed file's relations. Without a (repo, file)
+// index that delete visited every relation of the repository, so a cold
+// index grew with files x relations and a large module could not finish
+// within the one-minute index deadline.
+func TestRegressionPerFileRelationDeleteUsesIndex(t *testing.T) {
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query("EXPLAIN QUERY PLAN DELETE FROM relations WHERE repo=? AND file=?", "repo", "file.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	// The second row is the foreign-key cascade into relation_targets.
+	if len(plan) == 0 || !strings.HasPrefix(plan[0], "SEARCH relations ") || !strings.Contains(plan[0], "(repo=? AND file=?)") {
+		t.Fatalf("per-file relation delete is not an indexed search: %q", plan)
 	}
 }

@@ -87,6 +87,7 @@ CREATE INDEX IF NOT EXISTS relations_from ON relations(from_symbol);
 CREATE INDEX IF NOT EXISTS relations_to ON relations(to_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_from ON relations(repo,from_symbol);
 CREATE INDEX IF NOT EXISTS relations_repo_to ON relations(repo,to_symbol);
+CREATE INDEX IF NOT EXISTS relations_repo_file ON relations(repo,file);
 CREATE TABLE IF NOT EXISTS symbol_scopes(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,repo TEXT NOT NULL,namespace TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS symbol_scopes_namespace ON symbol_scopes(repo,namespace);
 CREATE TABLE IF NOT EXISTS symbol_content(symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,source_hash TEXT NOT NULL,end_line INTEGER NOT NULL);
