@@ -25,6 +25,7 @@ type lexDecl struct {
 	bodyStart, bodyEnd    int // body byte range; bodyStart < 0 when bodyless
 	callable, scope       bool
 	static                bool // statically bound member
+	exported              bool // JavaScript/TypeScript module export
 	supers                []lexSuper
 	locals                map[string]bool
 	bodyDepth             int // brace depth before the body opens
@@ -77,11 +78,17 @@ var lexPatterns = map[string][]lexPattern{
 }
 
 var (
-	rustImpl      = regexp.MustCompile(`^\s*(?:unsafe\s+)?impl\b(?:\s*<[^{]*?>)?\s+(?:([A-Za-z_][\w:]*)(?:<[^{]*?>)?\s+for\s+)?([A-Za-z_][\w:]*)`)
-	heritageWord  = regexp.MustCompile(`\b(extends|implements|permits)\b`)
-	pyBases       = regexp.MustCompile(`^[ \t]*class[ \t]+[A-Za-z_]\w*[ \t]*\(`)
-	lexStaticWord = regexp.MustCompile(`\b(?:static|private)\b`)
-	javaModifier  = wordSet("public protected private abstract static final synchronized native default strictfp transient sealed non-sealed")
+	rustInlineModLine = regexp.MustCompile(`^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*\{`)
+	jsExportedLine    = regexp.MustCompile(`^\s*export\b`)
+	jsExportList      = regexp.MustCompile(`(?m)^[ \t]*export[ \t]*\{([^}]*)\}[ \t]*;?[ \t]*$`)
+	jsExportDefault   = regexp.MustCompile(`(?m)^[ \t]*export[ \t]+default[ \t]+([A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$`)
+	cjsExportAssign   = regexp.MustCompile(`(?m)^[ \t]*(?:module\.)?exports\.([A-Za-z_$][\w$]*)[ \t]*=[ \t]*([A-Za-z_$][\w$]*)[ \t]*;?[ \t]*$`)
+	cjsExportObject   = regexp.MustCompile(`\bmodule\.exports\s*=\s*\{`)
+	rustImpl          = regexp.MustCompile(`^\s*(?:unsafe\s+)?impl\b(?:\s*<[^{]*?>)?\s+(?:([A-Za-z_][\w:]*)(?:<[^{]*?>)?\s+for\s+)?([A-Za-z_][\w:]*)`)
+	heritageWord      = regexp.MustCompile(`\b(extends|implements|permits)\b`)
+	pyBases           = regexp.MustCompile(`^[ \t]*class[ \t]+[A-Za-z_]\w*[ \t]*\(`)
+	lexStaticWord     = regexp.MustCompile(`\b(?:static|private)\b`)
+	javaModifier      = wordSet("public protected private abstract static final synchronized native default strictfp transient sealed non-sealed")
 )
 
 var lexKeywords = map[string]map[string]bool{
@@ -114,12 +121,12 @@ func analyzeLexicalFile(lang, repo, rel, src string, db *indexWriter) (int, erro
 	hashText := maskSource(lang, src, true)
 	for _, d := range decls {
 		d.id = goSymbolID(rel, d.name, d.line)
-		db.namespace = lexNamespace(rel, d.container, d.static)
+		db.namespace = lexNamespace(rel, d.container, d.static, d.exported)
 		db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
 			d.id, repo, rel, d.name, d.kind, d.line, d.signature)
 		db.content(repo, d.id, lexContent(s, hashText, d), d.endLine)
 	}
-	db.namespace = lexNamespace(rel, "", false)
+	db.namespace = lexNamespace(rel, "", false, false)
 	for _, d := range decls {
 		for _, super := range d.supers {
 			id := d.id + "->" + super.kind + ":" + super.qualifier + "." + super.name
@@ -141,17 +148,30 @@ func analyzeLexicalFile(lang, repo, rel, src string, db *indexWriter) (int, erro
 			return from.id, from.name
 		}
 		return "", ""
+	}, func(offset int, name string) bool {
+		var chain []*lexDecl
+		for _, d := range callables {
+			if offset > d.bodyStart && offset < d.bodyEnd {
+				chain = append(chain, d)
+			}
+		}
+		return lexBound(chain, name)
 	})
 	return len(decls), nil
 }
 
-// lexNamespace identifies a symbol's file and container for the lexical
-// resolver. It never contains '|', so Go resolution can never match it.
-func lexNamespace(rel, container string, static bool) string {
+// lexNamespace identifies a symbol's file, container and binding flags for
+// the lexical resolver. It never contains '|', so Go resolution can never
+// match it.
+func lexNamespace(rel, container string, static, exported bool) string {
+	namespace := "lex:" + rel + "#" + container
 	if static {
-		return "lex:" + rel + "#" + container + "#static"
+		namespace += "#static"
 	}
-	return "lex:" + rel + "#" + container
+	if exported {
+		namespace += "#export"
+	}
+	return namespace
 }
 
 // lexContent is the comment-masked declaration and body with whitespace
@@ -190,6 +210,15 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 			open = open[:len(open)-1]
 		}
 		if lang == "rust" {
+			if m := rustInlineModLine.FindStringSubmatch(text); m != nil {
+				// Items of an inline module are not items of the file's
+				// module, so the block is a scope of its own.
+				module := &lexDecl{name: "mod:" + m[1], kind: "mod", offset: start, line: line, scope: true}
+				lexBody(lang, s, module, start+len(m[0])-1)
+				scopes = append(scopes, module)
+				push(module)
+				continue
+			}
 			if m := rustImpl.FindStringSubmatch(text); m != nil {
 				impl := &lexDecl{name: lastPathSegment(m[2]), kind: "impl", offset: start, line: line, scope: true}
 				lexBody(lang, s, impl, start+len(m[0]))
@@ -233,6 +262,7 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 				break
 			}
 			d := &lexDecl{name: name, kind: p.kind, offset: start, paramStart: start + m[3], line: line, callable: p.callable, scope: p.scope, signature: strings.TrimSpace(text)}
+			d.exported = (lang == "javascript" || lang == "typescript") && jsExportedLine.MatchString(text)
 			if scope != nil {
 				d.container = scope.name
 				switch {
@@ -262,6 +292,45 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 			}
 			push(d)
 			break
+		}
+	}
+	if lang == "javascript" || lang == "typescript" {
+		// `export { a, b as c }` and `export default name` export earlier
+		// module-level declarations.
+		exported := map[string]bool{}
+		for _, m := range jsExportList.FindAllStringSubmatch(s.mask, -1) {
+			for _, item := range strings.Split(m[1], ",") {
+				if fields := strings.Fields(item); len(fields) > 0 && fields[0] != "type" {
+					exported[fields[0]] = true
+				}
+			}
+		}
+		for _, m := range jsExportDefault.FindAllStringSubmatch(s.mask, -1) {
+			exported[m[1]] = true
+		}
+		// CommonJS: `exports.f = f` and shorthand `module.exports = { f }`
+		// entries export the local f; `{ f: g }` exports g as f and is
+		// left out.
+		for _, m := range cjsExportAssign.FindAllStringSubmatch(s.mask, -1) {
+			if m[1] == m[2] {
+				exported[m[1]] = true
+			}
+		}
+		for _, m := range cjsExportObject.FindAllStringIndex(s.mask, -1) {
+			if end := s.closeBrace(m[1] - 1); end > 0 {
+				for _, entry := range splitTopLevel(s.mask[m[1] : end-1]) {
+					key, value, found := strings.Cut(entry, ":")
+					key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+					if validLexIdent(key) && (!found || key == value) {
+						exported[key] = true
+					}
+				}
+			}
+		}
+		for _, d := range decls {
+			if d.container == "" && exported[d.name] {
+				d.exported = true
+			}
 		}
 	}
 	assigned := lexAssignments(lang, s)
@@ -553,29 +622,14 @@ func lexCalls(lang string, s *lexSource, decls []*lexDecl) []lexCall {
 			callables = append(callables, d)
 		}
 	}
-	// Calls arrive in offset order and callables are sorted by body start,
-	// so the bodies enclosing the current call form a stack.
-	sort.SliceStable(callables, func(i, j int) bool { return callables[i].bodyStart < callables[j].bodyStart })
-	var open []*lexDecl
-	next := 0
-	enclosing := func(offset int) *lexDecl {
-		for next < len(callables) && callables[next].bodyStart < offset {
-			open = append(open, callables[next])
-			next++
-		}
-		for i := len(open) - 1; i >= 0; i-- {
-			if open[i].bodyEnd <= offset {
-				open = append(open[:i], open[i+1:]...)
-			}
-		}
-		var best *lexDecl
-		for _, d := range open {
-			if offset > d.bodyStart && offset < d.bodyEnd && (best == nil || d.bodyStart > best.bodyStart) {
-				best = d
-			}
-		}
-		return best
+	lexAssignLocals(lang, s, callables)
+	var modules [][2]int
+	if lang == "rust" {
+		modules = rustInlineMods(s)
 	}
+	// Calls arrive in offset order, so the bodies enclosing the current call
+	// form a stack (innermost last).
+	chainAt := lexSweep(callables, func(d *lexDecl) int { return d.bodyStart })
 	var calls []lexCall
 	for _, m := range lexCallPatterns[lang].FindAllStringSubmatchIndex(s.mask, -1) {
 		start := m[0]
@@ -596,8 +650,12 @@ func lexCalls(lang string, s *lexSource, decls []*lexDecl) []lexCall {
 		if prefix := strings.TrimRight(s.mask[max(0, start-9):start], " \t"); strings.HasSuffix(prefix, "new") || strings.HasSuffix(prefix, "def") || strings.HasSuffix(prefix, "fn") || strings.HasSuffix(prefix, "function") || strings.HasSuffix(prefix, "class") {
 			continue
 		}
-		from := enclosing(start)
-		if from == nil || start < from.paramStart && name == from.name {
+		chain := chainAt(start)
+		if len(chain) == 0 {
+			continue
+		}
+		from := chain[len(chain)-1]
+		if start < from.paramStart && name == from.name {
 			continue
 		}
 		if line, _ := s.position(start); line == from.line && name == from.name {
@@ -608,7 +666,13 @@ func lexCalls(lang string, s *lexSource, decls []*lexDecl) []lexCall {
 			local = strings.Split(qualifier, "::")[0]
 		}
 		hint := "lexcall\x1f" + qualifier + "\x1f" + from.container
-		if lexIsLocal(lang, s, from, local, qualifier != "") {
+		// Java method names and variables are separate namespaces, so there
+		// only qualifiers can be shadowed. Inside a Rust inline module only
+		// absolute crate:: paths are resolved: its scope is not the file's.
+		if (lang != "java" || qualifier != "") && lexBound(chain, local) {
+			hint = "lexlocal"
+		}
+		if insideRanges(modules, start) && !strings.HasPrefix(qualifier, "crate") {
 			hint = "lexlocal"
 		}
 		calls = append(calls, lexCall{offset: start, from: from, name: name, hint: hint})
@@ -643,7 +707,6 @@ var (
 			regexp.MustCompile(`\b(?:global|nonlocal|import)\s+([^\n]+)`),
 			regexp.MustCompile(`\b(?:def|class)\s+([A-Za-z_]\w*)`),
 			regexp.MustCompile(`\blambda\s+([^:]*):`),
-			regexp.MustCompile(`\bdef\s+\w+\s*\(([^)]*)\)`),
 		},
 		"rust": {
 			regexp.MustCompile(`\blet\s+([^=;]+)`),
@@ -661,46 +724,120 @@ var (
 
 func init() { lexLocalDecls["typescript"] = lexLocalDecls["javascript"] }
 
-// lexIsLocal reports a name bound as a parameter or local anywhere in the
-// calling function, conservatively: any binding position counts, even one in
-// a nested block or closure. Java method names and variables are separate
-// namespaces, so there only qualifiers are checked.
-func lexIsLocal(lang string, s *lexSource, from *lexDecl, name string, qualifier bool) bool {
-	if lang == "java" && !qualifier {
-		return false
+// lexSweep answers "which callables contain this offset" for non-decreasing
+// offsets in linear total time. start gives the offset a callable's scope
+// begins at; scopes nest or are disjoint.
+func lexSweep(callables []*lexDecl, start func(*lexDecl) int) func(int) []*lexDecl {
+	sorted := append([]*lexDecl(nil), callables...)
+	sort.SliceStable(sorted, func(i, j int) bool { return start(sorted[i]) < start(sorted[j]) })
+	var open []*lexDecl
+	next := 0
+	return func(offset int) []*lexDecl {
+		for next < len(sorted) && start(sorted[next]) < offset {
+			open = append(open, sorted[next])
+			next++
+		}
+		kept := open[:0]
+		for _, d := range open {
+			if d.bodyEnd > offset {
+				kept = append(kept, d)
+			}
+		}
+		open = kept
+		var chain []*lexDecl
+		for _, d := range open {
+			if offset > start(d) && offset < d.bodyEnd {
+				chain = append(chain, d)
+			}
+		}
+		return chain
 	}
-	if from.locals == nil {
-		from.locals = map[string]bool{}
-		end := from.bodyEnd
-		if end < from.paramStart {
-			end = from.paramStart
+}
+
+// lexAssignLocals records every parameter and local binding once, on the
+// innermost function whose scope contains it. A name is then local to a call
+// when any function enclosing the call binds it, which also covers closures
+// capturing an outer parameter. Over-approximation only leaves calls
+// unresolved.
+func lexAssignLocals(lang string, s *lexSource, callables []*lexDecl) {
+	// A Python function's scope starts after its name: the def line holds
+	// its own name (bound in the enclosing scope) and its parameters.
+	scopeStart := func(d *lexDecl) int {
+		if lang == "python" {
+			return d.paramStart
 		}
-		text := s.mask[from.paramStart:end]
-		if open := strings.IndexByte(text, '('); open >= 0 {
-			if close := s.matching(from.paramStart+open, lexStatementLimit); close > 0 {
-				for _, word := range lexIdentifier.FindAllString(s.mask[from.paramStart+open:close], -1) {
-					from.locals[word] = true
+		return d.bodyStart
+	}
+	for _, d := range callables {
+		d.locals = map[string]bool{}
+		header := s.mask[d.paramStart:max(d.paramStart, min(len(s.mask), d.paramStart+lexStatementLimit))]
+		if open := strings.IndexByte(header, '('); open >= 0 && (d.bodyStart < 0 || d.paramStart+open < d.bodyStart || lang == "python") {
+			if close := s.matching(d.paramStart+open, lexStatementLimit); close > 0 {
+				for _, param := range splitTopLevel(s.mask[d.paramStart+open+1 : close-1]) {
+					for _, word := range lexParamNames(lang, param) {
+						d.locals[word] = true
+					}
 				}
 			}
-		}
-		if i := strings.Index(text, "=>"); i >= 0 && !strings.Contains(text[:i], "(") {
-			for _, word := range lexIdentifier.FindAllString(text[:i], -1) {
-				from.locals[word] = true
-			}
-		}
-		for _, pattern := range lexLocalDecls[lang] {
-			for _, m := range pattern.FindAllStringSubmatch(text, -1) {
-				binding := m[1]
-				if lang == "javascript" || lang == "typescript" {
-					binding = lexBindingTargets(binding)
-				}
-				for _, word := range lexIdentifier.FindAllString(binding, -1) {
-					from.locals[word] = true
-				}
+		} else if arrow := strings.Index(header, "=>"); arrow >= 0 {
+			for _, word := range lexIdentifier.FindAllString(header[:arrow], -1) {
+				d.locals[word] = true
 			}
 		}
 	}
-	return from.locals[name]
+	for _, pattern := range lexLocalDecls[lang] {
+		chainAt := lexSweep(callables, scopeStart)
+		for _, m := range pattern.FindAllStringSubmatchIndex(s.mask, -1) {
+			chain := chainAt(m[2])
+			if len(chain) == 0 {
+				continue
+			}
+			binding := s.mask[m[2]:m[3]]
+			if lang == "javascript" || lang == "typescript" {
+				binding = lexBindingTargets(binding)
+			}
+			owner := chain[len(chain)-1]
+			for _, word := range lexIdentifier.FindAllString(binding, -1) {
+				owner.locals[word] = true
+			}
+		}
+	}
+}
+
+// lexParamNames returns the names one parameter binds: the pattern before a
+// type annotation or default value (Java: the last identifier).
+func lexParamNames(lang, param string) []string {
+	param = strings.TrimSpace(param)
+	if lang == "java" {
+		words := lexIdentifier.FindAllString(strings.Split(param, "=")[0], -1)
+		if len(words) == 0 {
+			return nil
+		}
+		return words[len(words)-1:]
+	}
+	if i := strings.IndexByte(param, '='); i >= 0 {
+		param = param[:i]
+	}
+	if i := strings.IndexByte(param, ':'); i >= 0 && !strings.HasPrefix(strings.TrimLeft(param, "*.&"), "{") && !strings.HasPrefix(strings.TrimLeft(param, "*.&"), "[") {
+		param = param[:i]
+	}
+	var names []string
+	for _, word := range lexIdentifier.FindAllString(param, -1) {
+		if word != "mut" && word != "ref" && word != "self" {
+			names = append(names, word)
+		}
+	}
+	return names
+}
+
+// lexBound reports a name bound by any function in the chain.
+func lexBound(chain []*lexDecl, name string) bool {
+	for _, d := range chain {
+		if d.locals[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // lexBindingTargets keeps the binding side of `a = 1, { b, c: d } = o`.

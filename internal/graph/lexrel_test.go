@@ -26,7 +26,7 @@ func TestExtractImports(t *testing.T) {
 		{"ts type-only", "typescript", "import type { T } from './types';\n", "named:T<./types|T>"},
 		{"js default and named", "javascript", "import React, { useState } from 'react';\n", "default:React<react|default> named:useState<react|useState>"},
 		{"js re-exports", "typescript", "export { x } from './x';\nexport * from './all';\nexport { y };\n", "reexport:x<./x|x> reexport:<./all|>"},
-		{"js require", "javascript", "const y = require('./y');\nconst { p, q: r } = require('./pq');\n", "namespace:y<./y|> named:p<./pq|p> named:r<./pq|q>"},
+		{"js require", "javascript", "const y = require('./y');\nconst { p, q: r } = require('./pq');\n", "require:y<./y|> named:p<./pq|p> named:r<./pq|q>"},
 		{"js dynamic import", "javascript", "async function f() { await import('./lazy'); loader.import('./not'); }\n", "module:<./lazy|>"},
 		{"js multi-line", "typescript", "import {\n  one,\n  two,\n} from './multi';\n", "named:one<./multi|one> named:two<./multi|two>"},
 		{"js comments and strings", "javascript", "// import { fake } from './commented';\nconst s = \"import { fake } from './string'\";\n/* import x from './block'; */\n", ""},

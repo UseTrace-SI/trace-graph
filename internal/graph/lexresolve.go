@@ -55,6 +55,7 @@ func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
 		// Work with unscoped identities; outcomes are scoped once on write.
 		sym.id = strings.TrimPrefix(sym.id, scope)
 		if container, ok := strings.CutPrefix(namespace, "lex:"+sym.file+"#"); ok {
+			container, sym.exported = strings.CutSuffix(container, "#export")
 			sym.container, sym.static = strings.CutSuffix(container, "#static")
 		} else if !strings.Contains(namespace, "|") {
 			sym.container = lexLocalContainer // lexical inventory of other languages
@@ -91,6 +92,17 @@ func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
 		target             any
 	}
 	var outcomes []outcome
+	// Every name an import binds in each file, before resolution: a module
+	// that both imports and declares a name binds it ambiguously.
+	r.bound = map[string]map[string]bool{}
+	for _, rel := range pending {
+		if fields := strings.Split(rel.hint, "\x1f"); fields[0] == "leximport" && len(fields) == 6 && fields[4] != "" && fields[5] != "inline" {
+			if r.bound[rel.file] == nil {
+				r.bound[rel.file] = map[string]bool{}
+			}
+			r.bound[rel.file][fields[4]] = true
+		}
+	}
 	// Imports first: they define the bindings calls resolve through.
 	for _, rel := range pending {
 		fields := strings.Split(rel.hint, "\x1f")
@@ -102,8 +114,9 @@ func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
 		if written == "" || kind == "default" {
 			written = specifier
 		}
-		binding := r.resolveImport(lang, rel.file, specifier, imported, kind)
-		if local != "" && (kind == "named" || kind == "default" || kind == "namespace" || kind == "module" || kind == "mod") {
+		symbol, module := r.importTarget(lang, rel.file, specifier, imported, kind)
+		if local != "" && kind != "inline" {
+			binding := r.importBinding(lang, rel.file, specifier, imported, kind, symbol, module)
 			if r.bindings[rel.file] == nil {
 				r.bindings[rel.file] = map[string]lexBinding{}
 			}
@@ -113,10 +126,10 @@ func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
 			r.bindings[rel.file][local] = binding
 		}
 		switch {
-		case binding.symbol != "":
-			outcomes = append(outcomes, outcome{rel.id, written, "lexical", scopedID(repo, binding.symbol)})
-		case binding.module != "":
-			outcomes = append(outcomes, outcome{rel.id, binding.module, "module", nil})
+		case symbol != "":
+			outcomes = append(outcomes, outcome{rel.id, written, "lexical", scopedID(repo, symbol)})
+		case module != "":
+			outcomes = append(outcomes, outcome{rel.id, module, "module", nil})
 		default:
 			outcomes = append(outcomes, outcome{rel.id, written, "unresolved", nil})
 		}
@@ -179,16 +192,19 @@ func closeRows(rows *sql.Rows) error {
 type lexSymbol struct {
 	id, file, name, kind, container string
 	line                            int
-	static                          bool
+	static, exported                bool
 }
 
 type lexRelation struct{ id, file, to, hint string }
 
-// lexBinding is what a local import name refers to: a symbol, or a module
-// file whose members it qualifies.
+// lexBinding is what a local import name lets calls resolve through: a
+// declaration, or a module file whose members it qualifies. A binding with
+// neither (a default export, module.exports, an unresolved name) resolves
+// nothing.
 type lexBinding struct {
 	symbol, module string
 	member         string // a type imported from module, for Type.member calls
+	exportedOnly   bool   // members must be module exports (ES namespaces)
 	conflict       bool
 }
 
@@ -200,6 +216,7 @@ type lexResolver struct {
 	names    map[string]map[string][]lexSymbol
 	ids      map[string]lexSymbol
 	bindings map[string]map[string]lexBinding
+	bound    map[string]map[string]bool // names each file's imports bind
 }
 
 func suffixKey(path string) string {
@@ -260,34 +277,74 @@ func (r *lexResolver) uniqueSuffix(paths ...string) string {
 	return found
 }
 
-// resolveImport maps an import to its module file and, for a named import,
-// the declaration it names (or the submodule it names).
-func (r *lexResolver) resolveImport(lang, from, specifier, imported, kind string) lexBinding {
+// importTarget is what an import statement refers to: its module file and,
+// for a named import, the declaration it names. A JavaScript/TypeScript
+// declaration must be exported, and a name the module both declares and
+// imports is ambiguous, so neither names a declaration.
+func (r *lexResolver) importTarget(lang, from, specifier, imported, kind string) (string, string) {
 	if lang == "java" {
-		return r.javaImport(specifier, imported, kind)
+		binding := r.javaImport(specifier, imported, kind)
+		return binding.symbol, binding.module
+	}
+	switch kind {
+	case "inline":
+		return "", ""
+	case "mod":
+		return "", r.rustChild(from, imported)
 	}
 	module := r.resolveModule(lang, from, specifier, kind)
-	if kind == "mod" {
-		return lexBinding{module: r.rustChild(from, imported)}
+	if module == "" || kind != "named" || imported == "" {
+		return "", module
 	}
-	if module == "" {
-		return lexBinding{}
+	if !r.bound[module][imported] {
+		if symbol := r.unique(module, imported, r.exportFilter(lang)); symbol != "" {
+			return symbol, module
+		}
 	}
-	if imported == "" || kind == "default" || kind == "namespace" || kind == "module" || kind == "reexport" && imported == "" {
-		return lexBinding{module: module}
+	// `from pkg import submodule` and `use crate::a::b` name modules.
+	if sub := r.submodule(lang, module, imported); sub != "" {
+		return "", sub
 	}
-	if symbol := r.unique(module, imported, moduleLevel); symbol != "" {
+	return "", module
+}
+
+// exportFilter accepts the module-level declarations another module can
+// import by name.
+func (r *lexResolver) exportFilter(lang string) func(lexSymbol) bool {
+	if lang == "javascript" || lang == "typescript" {
+		return func(sym lexSymbol) bool { return moduleLevel(sym) && sym.exported }
+	}
+	return moduleLevel
+}
+
+// importBinding is what an import's local name refers to for calls.
+func (r *lexResolver) importBinding(lang, from, specifier, imported, kind, symbol, module string) lexBinding {
+	switch {
+	case lang == "java":
+		return r.javaImport(specifier, imported, kind)
+	case symbol != "":
 		binding := lexBinding{symbol: symbol}
 		if r.ids[symbol].kind == "type" {
 			binding.module, binding.member = module, imported
 		}
 		return binding
+	case kind == "named":
+		// A named import that resolved to a module names that module.
+		if module != "" && module != r.resolveModule(lang, from, specifier, kind) {
+			return lexBinding{module: module}
+		}
+		return lexBinding{}
+	case kind == "namespace":
+		return lexBinding{module: module, exportedOnly: lang == "javascript" || lang == "typescript"}
+	case kind == "module" && lang == "python":
+		// `import a.b` binds the package a, not a.b.
+		return lexBinding{module: r.resolveModule(lang, from, strings.Split(specifier, ".")[0], kind)}
+	case kind == "mod":
+		return lexBinding{module: module}
 	}
-	// `from pkg import submodule` and `use crate::a::b` name modules.
-	if sub := r.submodule(lang, module, imported); sub != "" {
-		return lexBinding{module: sub}
-	}
-	return lexBinding{module: module}
+	// Default exports, module.exports values, re-exports and inline-module
+	// paths bind values whose members are unknown.
+	return lexBinding{}
 }
 
 func (r *lexResolver) submodule(lang, module, name string) string {
@@ -503,7 +560,11 @@ func (r *lexResolver) resolveName(lang, file, qualifier, name, callerContainer s
 		return ""
 	}
 	if qualifier == "" {
+		_, imported := r.bindings[file][name]
 		if id := r.unique(file, name, moduleDecl); id != "" {
+			if imported {
+				return "" // declared and imported: whichever binds last wins
+			}
 			return id
 		}
 		if lang == "java" && callerContainer != "" && callerContainer != lexLocalContainer {
@@ -531,12 +592,12 @@ func (r *lexResolver) resolveName(lang, file, qualifier, name, callerContainer s
 	}
 	if binding, ok := r.bindings[file][qualifier]; ok {
 		switch {
-		case binding.conflict:
-			return ""
+		case binding.conflict || r.unique(file, qualifier, moduleLevel) != "":
+			return "" // also declared in this file
 		case binding.member != "":
 			return r.unique(binding.module, name, member(binding.member))
 		case binding.module != "" && binding.symbol == "":
-			return r.unique(binding.module, name, moduleDecl)
+			return r.unique(binding.module, name, func(sym lexSymbol) bool { return moduleDecl(sym) && (sym.exported || !binding.exportedOnly) })
 		}
 		return ""
 	}

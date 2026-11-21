@@ -234,7 +234,7 @@ type lexImport struct {
 	specifier string // module as written: './x', 'a.b', 'crate::a', 'com.x'
 	imported  string // name taken from the module, "" for the module itself
 	local     string // local binding, "" when none
-	kind      string // named, default, namespace, module, reexport or mod
+	kind      string // named, default, namespace, require, module, reexport, mod or inline
 }
 
 // lexRoute is one HTTP route registration.
@@ -304,7 +304,8 @@ func jsImports(s *lexSource) []lexImport {
 		}
 		binding := s.mask[m[2]:m[3]]
 		if !strings.HasPrefix(binding, "{") {
-			out = append(out, lexImport{offset: m[0], specifier: specifier, local: binding, kind: "namespace"})
+			// module.exports may be any value, so its members are unknown.
+			out = append(out, lexImport{offset: m[0], specifier: specifier, local: binding, kind: "require"})
 			continue
 		}
 		for _, item := range strings.Split(strings.Trim(binding, "{} \t\r\n"), ",") {
@@ -479,8 +480,42 @@ func pyImports(s *lexSource) []lexImport {
 	return out
 }
 
+// rustInlineModLines finds `mod name {` blocks.
+var rustInlineModStart = regexp.MustCompile(`(?m)^[ \t]*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+[A-Za-z_]\w*[ \t]*\{`)
+
+// rustInlineMods returns the byte ranges of inline module blocks.
+func rustInlineMods(s *lexSource) [][2]int {
+	var ranges [][2]int
+	for _, m := range rustInlineModStart.FindAllStringIndex(s.mask, -1) {
+		if end := s.closeBrace(m[1] - 1); end > 0 {
+			ranges = append(ranges, [2]int{m[1] - 1, end})
+		}
+	}
+	return ranges
+}
+
+func insideRanges(ranges [][2]int, offset int) bool {
+	for _, r := range ranges {
+		if offset > r[0] && offset < r[1] {
+			return true
+		}
+	}
+	return false
+}
+
+// rustImports reads use trees and `mod name;` declarations. An import inside
+// an inline module binds names in that module only, and its self::/super::
+// paths are relative to it, so it is recorded but never resolved or bound.
 func rustImports(s *lexSource) []lexImport {
 	var out []lexImport
+	modules := rustInlineMods(s)
+	defer func() {
+		for i := range out {
+			if insideRanges(modules, out[i].offset) {
+				out[i].kind = "inline"
+			}
+		}
+	}()
 	for _, m := range rustUse.FindAllStringIndex(s.mask, -1) {
 		end := strings.IndexByte(s.mask[m[1]:min(len(s.mask), m[1]+lexStatementLimit)], ';')
 		if end < 0 {
@@ -808,8 +843,10 @@ func (s *lexSource) lineText(line int) string {
 }
 
 // writeLexRelations records imports and routes. enclosing names the function
-// that contains an offset, or returns empty strings at module scope.
-func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, enclosing func(int) (string, string)) {
+// that contains an offset, or returns empty strings at module scope; local
+// (nil when unknown) reports a name bound by a function enclosing an offset.
+// A route handler bound that way is a parameter or local and never resolves.
+func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, enclosing func(int) (string, string), local func(int, string) bool) {
 	if lang == "" {
 		return
 	}
@@ -830,6 +867,15 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, en
 			handler = "(inline)"
 		}
 		id := rel + "#route:" + itoa(line) + ":" + itoa(column) + ":" + route.method
-		db.relation(repo, rel, id, fromID, route.method+" "+route.path, handler, "route", line, strings.Join([]string{"lexroute", route.qualifier, route.handler, itoa(route.decorated)}, "\x1f"))
+		hint := strings.Join([]string{"lexroute", route.qualifier, route.handler, itoa(route.decorated)}, "\x1f")
+		if bound := route.qualifier; local != nil && route.decorated == 0 && route.handler != "" {
+			if bound == "" {
+				bound = route.handler
+			}
+			if local(route.offset, bound) {
+				hint = "lexlocal"
+			}
+		}
+		db.relation(repo, rel, id, fromID, route.method+" "+route.path, handler, "route", line, hint)
 	}
 }

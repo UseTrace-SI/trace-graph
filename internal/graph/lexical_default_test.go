@@ -263,3 +263,62 @@ func TestLexicalBodySearchesAreBounded(t *testing.T) {
 		}
 	}
 }
+
+// Each case was a guessed edge stored as lexical. A name never resolves
+// through a binding whose target is unknown or ambiguous.
+func TestRegressionLexicalBindingsNeverGuess(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture map[string]string
+		edges   map[string]map[string]goEdge
+	}{
+		{"python import a.b binds the package a", map[string]string{
+			"pkg/__init__.py": "def run():\n    pass\n",
+			"pkg/util.py":     "def run():\n    pass\n",
+			"app.py":          "import pkg.util\n\ndef main():\n    pkg.run()\n",
+		}, map[string]map[string]goEdge{
+			"call":   {"main->run@4": lexEdge("pkg/__init__.py:run:1")},
+			"import": {"app.py->pkg/util.py@1": {"module", ""}},
+		}},
+		{"python name both imported and declared", map[string]string{
+			"fast.py": "def parse(x):\n    return x\n",
+			"mod.py":  "try:\n    from .fast import parse\nexcept ImportError:\n    def parse(x):\n        return None\n\ndef use():\n    return parse(1)\n",
+		}, map[string]map[string]goEdge{"call": {"use->parse@8": lexEdge("")}}},
+		{"default import members are unknown", map[string]string{
+			"logger.js": "function log(msg) { console.log(msg) }\nclass Logger { log(m) { write(m) } }\nexport default new Logger()\n",
+			"app.js":    "import logger from './logger'\nexport function main() {\n  logger.log('x')\n}\n",
+		}, map[string]map[string]goEdge{"call": {"main->log@3": lexEdge("")}, "import": {"app.js->logger.js@1": {"module", ""}}}},
+		{"module.exports members are unknown, destructured requires resolve", map[string]string{
+			"util.js": "function helper() {}\nfunction other() {}\nmodule.exports = { helper, other }\n",
+			"app.js":  "const util = require('./util')\nconst { helper } = require('./util')\nfunction main() {\n  util.other()\n  helper()\n}\n",
+		}, map[string]map[string]goEdge{"call": {"main->other@4": lexEdge(""), "main->helper@5": lexEdge("util.js:helper:1")}}},
+		{"ES imports resolve to exports only", map[string]string{
+			"lib.js": "function hidden() {}\nfunction listed() {}\nexport function direct() {}\nexport { listed }\n",
+			"app.js": "import { hidden, listed, direct } from './lib'\nimport * as lib from './lib'\nexport function main() {\n  hidden()\n  listed()\n  direct()\n  lib.hidden()\n  lib.listed()\n}\n",
+		}, map[string]map[string]goEdge{"call": {
+			"main->hidden@4": lexEdge(""), "main->listed@5": lexEdge("lib.js:listed:2"), "main->direct@6": lexEdge("lib.js:direct:3"),
+			"main->hidden@7": lexEdge(""), "main->listed@8": lexEdge("lib.js:listed:2"),
+		}}},
+		{"route handler bound as a parameter", map[string]string{
+			"routes.js": "function handler(req, res) {}\nexport function mount(app, handler) {\n  app.get('/x', handler)\n  handler()\n}\n",
+		}, map[string]map[string]goEdge{"route": {"GET /x->handler@3": lexEdge("")}, "call": {"mount->handler@4": lexEdge("")}}},
+		{"closures see their enclosing functions' parameters", map[string]string{
+			"m.py": "def helper():\n    pass\n\ndef outer(helper):\n    def inner():\n        return helper()\n    return inner\n",
+			"m.js": "function log(m) {}\nexport function process(items, log) {\n  const each = (x) => log(x)\n  items.forEach(each)\n}\n",
+		}, map[string]map[string]goEdge{"call": {"inner->helper@6": lexEdge(""), "each->log@3": lexEdge("")}}},
+		{"rust inline modules have their own scope", map[string]string{
+			"src/lib.rs":    "pub mod config;\npub struct Config;\nimpl Config {\n    pub fn new() -> Self { Config }\n}\n",
+			"src/config.rs": "pub struct Config;\nimpl Config {\n    pub fn new() -> Self { Config }\n}\n\npub fn build() -> Config { Config::new() }\n\n#[cfg(test)]\nmod tests {\n    use super::Config;\n    #[test]\n    fn builds() {\n        Config::new();\n    }\n}\n",
+		}, map[string]map[string]goEdge{
+			"import": {"src/config.rs->Config@10": lexEdge("")},
+			"call":   {"builds->new@13": lexEdge(""), "build->new@6": lexEdge("src/config.rs:new:3")},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, root := goTypeFixture(t, tc.fixture)
+			for kind, want := range tc.edges {
+				expectEdges(t, goEdges(t, db, root, kind), want)
+			}
+		})
+	}
+}
