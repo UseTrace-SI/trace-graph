@@ -303,15 +303,18 @@ func cochangeCmd() *cobra.Command {
 		flush := func() {
 			for i := 0; i < len(current) && !overBudget; i++ {
 				for j := i + 1; j < len(current); j++ {
-					if len(counts) >= maxPairs {
-						overBudget = true
-						break
-					}
 					a, b := current[i], current[j]
 					if a > b {
 						a, b = b, a
 					}
-					counts[pair{a, b}]++
+					// The budget bounds unique pairs: counting another
+					// co-change of a known pair never exceeds it.
+					key := pair{a, b}
+					if _, known := counts[key]; !known && len(counts) >= maxPairs {
+						overBudget = true
+						break
+					}
+					counts[key]++
 				}
 			}
 			current = nil

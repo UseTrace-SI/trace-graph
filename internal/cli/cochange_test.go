@@ -174,3 +174,49 @@ func TestRegressionCochangeKeepsQuotedPaths(t *testing.T) {
 		}
 	}
 }
+
+// The pair budget refused a history once it held exactly --max-pairs unique
+// pairs and any of them changed again, although no new pair was added.
+func TestRegressionCochangePairBudgetCountsUniquePairs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		commits [][]string
+		want    string
+		fails   bool
+	}{
+		{name: "repeated pair stays within budget", commits: [][]string{{"a.go", "b.go"}, {"a.go", "b.go"}, {"a.go", "b.go"}}, want: "3  a.go  <->  b.go"},
+		{name: "new pair exceeds budget", commits: [][]string{{"a.go", "b.go"}, {"c.go", "d.go"}}, fails: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			compareTestGit(t, root, "init", "-q")
+			for i, files := range tc.commits {
+				for _, file := range files {
+					if err := os.WriteFile(filepath.Join(root, file), []byte(fmt.Sprintf("package p\n// %d\n", i)), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				compareTestGit(t, root, "add", "-A")
+				compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+			}
+			var out bytes.Buffer
+			cmd := newRoot()
+			cmd.SetOut(&out)
+			cmd.SetErr(&bytes.Buffer{})
+			cmd.SetArgs([]string{"--repo", root, "cochange", "--max-pairs", "1"})
+			err = cmd.Execute()
+			if tc.fails {
+				if err == nil || !strings.Contains(err.Error(), "exceeds 1 unique file pairs") {
+					t.Fatalf("budget not enforced: %v %s", err, &out)
+				}
+				return
+			}
+			if err != nil || !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("got %v %q, want %q", err, &out, tc.want)
+			}
+		})
+	}
+}
