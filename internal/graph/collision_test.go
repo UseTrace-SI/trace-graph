@@ -45,8 +45,9 @@ func TestAnalyzeRepoRejectsCollidingDeclarationIdentities(t *testing.T) {
 	if err := os.WriteFile(source, []byte(colliding), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AnalyzeRepo(root, db); err == nil || !strings.Contains(err.Error(), "colliding declaration identities") {
-		t.Fatalf("persistent analysis accepted a collision: %v", err)
+	// The error names the colliding declaration so it can be found.
+	if _, err := AnalyzeRepo(root, db); err == nil || !strings.Contains(err.Error(), "colliding declaration identities (p.go:Same:4)") {
+		t.Fatalf("persistent analysis accepted or did not locate a collision: %v", err)
 	}
 	var symbols, files, receivers int
 	if err := db.QueryRow("SELECT count(*) FROM symbols WHERE repo=?", root).Scan(&symbols); err != nil || symbols != before {

@@ -76,7 +76,7 @@ func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
 			w.symbolIDs = map[string]bool{}
 		}
 		if w.symbolIDs[id] {
-			w.err = fmt.Errorf("repository contains colliding declaration identities; separate same-name declarations onto different lines")
+			w.err = fmt.Errorf("repository contains colliding declaration identities (%s); separate same-name declarations onto different lines", id)
 			return nil, w.err
 		}
 		w.symbolIDs[id] = true
