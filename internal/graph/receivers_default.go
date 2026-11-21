@@ -9,12 +9,28 @@ import "go/ast"
 // factory returns, embedded promotion and dynamic dispatch stay unresolved.
 const receiverEvidenceDepth = 32
 
-// scope is the file's package scope. Methods can only be declared on
-// package-level types, so a function-local type that reuses a package-level
-// type's name is not evidence for that type's methods.
-func declaredTypeName(scope *ast.Scope, expr ast.Expr) string { return localTypeName(scope, expr, 0) }
+// packageTypes holds the file's package-level type declarations. Methods
+// can only be declared on package-level types, so a function-local type that
+// reuses a package-level type's name is not evidence for that type's methods.
+type packageTypes map[*ast.TypeSpec]bool
 
-func localTypeName(scope *ast.Scope, expr ast.Expr, depth int) string {
+func filePackageTypes(file *ast.File) packageTypes {
+	types := packageTypes{}
+	for _, decl := range file.Decls {
+		if gen, ok := decl.(*ast.GenDecl); ok {
+			for _, spec := range gen.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok {
+					types[ts] = true
+				}
+			}
+		}
+	}
+	return types
+}
+
+func declaredTypeName(scope packageTypes, expr ast.Expr) string { return localTypeName(scope, expr, 0) }
+
+func localTypeName(scope packageTypes, expr ast.Expr, depth int) string {
 	if depth >= receiverEvidenceDepth {
 		return ""
 	}
@@ -36,7 +52,7 @@ func localTypeName(scope *ast.Scope, expr ast.Expr, depth int) string {
 			if spec.Assign.IsValid() {
 				return localTypeName(scope, spec.Type, depth+1)
 			}
-			if scope == nil || scope.Lookup(x.Name) != x.Obj {
+			if !scope[spec] {
 				return ""
 			}
 			return x.Name
@@ -48,9 +64,9 @@ func localTypeName(scope *ast.Scope, expr ast.Expr, depth int) string {
 	return ""
 }
 
-func receiverType(scope *ast.Scope, expr ast.Expr) string { return localReceiverType(scope, expr, 0) }
+func receiverType(scope packageTypes, expr ast.Expr) string { return localReceiverType(scope, expr, 0) }
 
-func localReceiverType(scope *ast.Scope, expr ast.Expr, depth int) string {
+func localReceiverType(scope packageTypes, expr ast.Expr, depth int) string {
 	if depth >= receiverEvidenceDepth {
 		return ""
 	}

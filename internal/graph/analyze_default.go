@@ -96,6 +96,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 	// directives in generated code remap lines (and zero columns), which
 	// would move symbols and merge distinct call sites into one ID.
 	position := func(pos token.Pos) token.Position { return fset.PositionFor(pos, false) }
+	packageLevel := filePackageTypes(file)
 	imports := map[string]string{}
 	module := ""
 	if db.moduleOverride != nil {
@@ -135,7 +136,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 				id, repo, rel, d.Name.Name, kind, line, goSignature(fset, d))
 			db.content(repo, id, src[position(d.Pos()).Offset:position(d.End()).Offset], position(d.End()).Line)
 			if d.Recv != nil && len(d.Recv.List) == 1 {
-				if receiver := declaredTypeName(file.Scope, d.Recv.List[0].Type); receiver != "" && db.err == nil {
+				if receiver := declaredTypeName(packageLevel, d.Recv.List[0].Type); receiver != "" && db.err == nil {
 					_, _ = db.write("INSERT INTO symbol_receivers(symbol_id,receiver) VALUES(?,?) ON CONFLICT(symbol_id) DO UPDATE SET receiver=excluded.receiver", scopedID(repo, id), receiver)
 				}
 			}
@@ -157,7 +158,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 						}
 					}
 					if hint == "unresolved" {
-						if receiver := receiverType(file.Scope, fn.X); receiver != "" {
+						if receiver := receiverType(packageLevel, fn.X); receiver != "" {
 							hint = "receiver:" + receiver
 						}
 					}

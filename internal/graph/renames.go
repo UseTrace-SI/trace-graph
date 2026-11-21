@@ -286,7 +286,7 @@ func SymbolRenames(base, head RevisionStats, removed, added []RenameSymbol) (ren
 		return renames, ambiguous, false
 	}
 	score := func(a, b candidate) (float64, float64) {
-		if a.symbol.Kind != b.symbol.Kind || a.symbol.Name == b.symbol.Name || strings.ToLower(pathpkg.Ext(a.symbol.File)) != strings.ToLower(pathpkg.Ext(b.symbol.File)) {
+		if a.symbol.Kind != b.symbol.Kind || a.symbol.Name == b.symbol.Name || !strings.EqualFold(pathpkg.Ext(a.symbol.File), pathpkg.Ext(b.symbol.File)) {
 			return 0, 0
 		}
 		sim := similarity(a.shape.sketch, b.shape.sketch)
