@@ -143,9 +143,9 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			if d.Body == nil {
 				continue
 			}
-			for _, site := range goCallSites(d.Body) {
+			hintFor := func(expr ast.Expr) string {
 				hint := "unresolved"
-				switch fn := site.fun.(type) {
+				switch fn := expr.(type) {
 				case *ast.Ident:
 					if fn.Obj == nil || fn.Obj.Kind == ast.Fun {
 						hint = "identifier"
@@ -162,8 +162,15 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 						}
 					}
 				}
+				return hint
+			}
+			for _, site := range goCallSites(d.Body) {
 				at := position(site.call.Pos())
-				db.call(repo, rel, id, d.Name.Name, site.callee, at.Line, at.Column, hint)
+				db.call(repo, rel, id, d.Name.Name, site.callee, at.Line, at.Column, hintFor(site.fun))
+				if method, path, handler, ok := goRoute(site); ok {
+					// The handler reference resolves like a call of it.
+					db.relation(repo, rel, goRouteRelationID(id, at.Line, at.Column), id, method+" "+path, goHandlerName(handler), "route", at.Line, hintFor(handler))
+				}
 			}
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {

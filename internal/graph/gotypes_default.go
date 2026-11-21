@@ -396,6 +396,13 @@ func (p *goTypePass) classifyCalls(pkg *goTypePackage, info *types.Info) {
 				relation := goRelationID(fromID, site.callee, at.Line, at.Column)
 				outcome, dynamic := p.classify(file, info, site)
 				p.record(relation, outcome)
+				if _, _, handler, ok := goRoute(site); ok {
+					handlerOutcome := goOutcome{kind: goExternal} // inline handler
+					if fun, _ := goCallee(handler); fun != nil {
+						handlerOutcome, _ = p.classify(file, info, goCallSite{fun: fun})
+					}
+					p.record(goRouteRelationID(fromID, at.Line, at.Column), handlerOutcome)
+				}
 				if dynamic != nil {
 					dynamic.relation, dynamic.fromID, dynamic.fromName, dynamic.file, dynamic.line = relation, fromID, fn.Name.Name, file.rel, at.Line
 					p.dynamic = append(p.dynamic, *dynamic)

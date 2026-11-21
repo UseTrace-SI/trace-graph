@@ -318,3 +318,46 @@ func TestGoTypesDeadlineReserveDefersToNextRefresh(t *testing.T) {
 	}
 	expectEdges(t, goEdges(t, db, root, "call"), map[string]goEdge{"Use->Run@9": {"typed", "p/p.go:Run:5"}})
 }
+
+// Route registrations become route edges whose handler resolves like a call
+// of it: method values and functions through the type checker, inline
+// handlers stay unresolved, and lookalike calls without a literal path are
+// not routes.
+func TestGoRoutesResolveHandlers(t *testing.T) {
+	db, root := goTypeFixture(t, map[string]string{
+		"go.mod": "module example.test/m\n\ngo 1.26\n",
+		"api/api.go": `package api
+
+import "net/http"
+
+type Server struct{}
+
+func (s *Server) users(w http.ResponseWriter, r *http.Request) {}
+
+func health(w http.ResponseWriter, r *http.Request) {}
+
+func Routes(s *Server, mux *http.ServeMux, store map[string]int, r Router) {
+	mux.HandleFunc("GET /users", s.users)
+	mux.HandleFunc("/health", health)
+	http.HandleFunc("/inline", func(w http.ResponseWriter, r *http.Request) {})
+	mux.Handle("/files/", http.FileServer(http.Dir(".")))
+	r.Get("/chi", health)
+	r.Get("key", health)
+}
+
+type Router interface{ Get(string, http.HandlerFunc) }
+`,
+	})
+	got := goEdges(t, db, root, "route")
+	want := map[string]goEdge{
+		"GET /users->users@12":   {"typed", "api/api.go:users:7"},
+		"* /health->health@13":   {"typed", "api/api.go:health:9"},
+		"* /inline->(inline)@14": {"unresolved", ""},
+		"* /files/->(inline)@15": {"unresolved", ""},
+		"GET /chi->health@16":    {"typed", "api/api.go:health:9"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("routes %v, want %v", got, want)
+	}
+	expectEdges(t, got, want)
+}
