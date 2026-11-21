@@ -117,6 +117,11 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
+			// The blank identifier declares nothing; `var _, _ = f()` used to
+			// yield two identical identities and fail the whole index.
+			if d.Name.Name == "_" {
+				continue
+			}
 			line := position(d.Pos()).Line
 			kind := "func"
 			if d.Recv != nil {
@@ -159,7 +164,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 			}
 		case *ast.GenDecl:
 			for _, spec := range d.Specs {
-				if ts, ok := spec.(*ast.TypeSpec); ok {
+				if ts, ok := spec.(*ast.TypeSpec); ok && ts.Name.Name != "_" {
 					line := position(ts.Pos()).Line
 					id := goSymbolID(rel, ts.Name.Name, line)
 					db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
@@ -169,6 +174,9 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 				}
 				if vs, ok := spec.(*ast.ValueSpec); ok {
 					for _, nm := range vs.Names {
+						if nm.Name == "_" {
+							continue
+						}
 						line := position(nm.Pos()).Line
 						id := goSymbolID(rel, nm.Name, line)
 						db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",

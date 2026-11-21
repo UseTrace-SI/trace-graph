@@ -381,7 +381,7 @@ func (p *goTypePass) classifyCalls(pkg *goTypePackage, info *types.Info) {
 	for _, file := range pkg.files {
 		for _, decl := range file.file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
+			if !ok || fn.Body == nil || fn.Name.Name == "_" {
 				continue
 			}
 			fromID := goSymbolID(file.rel, fn.Name.Name, p.fset.PositionFor(fn.Pos(), false).Line)
