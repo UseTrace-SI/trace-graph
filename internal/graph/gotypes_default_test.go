@@ -3,12 +3,14 @@
 package graph
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/UseTrace-SI/trace-graph/internal/store"
 )
@@ -284,4 +286,35 @@ func TestGoTypesSourceBudgetKeepsSyntaxEvidence(t *testing.T) {
 	if err := db.QueryRow("SELECT detail FROM repo_resolution WHERE repo=?", root).Scan(&detail); err != nil || !strings.Contains(detail, `"reason":"go_source_budget"`) {
 		t.Fatalf("budget skip not recorded: %s %v", detail, err)
 	}
+}
+
+// Without time left before the index deadline the pass records itself as
+// partial and keeps syntax evidence; the next refresh, even with no changed
+// file, completes it.
+func TestGoTypesDeadlineReserveDefersToNextRefresh(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionTestWrite(t, root, "p/p.go", "package p\n\ntype T struct{}\n\nfunc (T) Run() {}\n\nfunc Make() T { return T{} }\n\nfunc Use() { Make().Run() }\n")
+	db, err := store.Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), goTypeReserve-5*time.Second)
+	defer cancel()
+	if _, err := AnalyzeRepoContext(ctx, root, db); err != nil {
+		t.Fatal(err)
+	}
+	var complete int
+	var detail string
+	if err := db.QueryRow("SELECT complete,detail FROM repo_resolution WHERE repo=?", root).Scan(&complete, &detail); err != nil || complete != 0 || !strings.Contains(detail, `"reason":"time_budget"`) {
+		t.Fatalf("partial pass not recorded: %d %s %v", complete, detail, err)
+	}
+	expectEdges(t, goEdges(t, db, root, "call"), map[string]goEdge{"Use->Run@9": {"unresolved", ""}})
+	if _, err := AnalyzeRepo(root, db); err != nil {
+		t.Fatal(err)
+	}
+	expectEdges(t, goEdges(t, db, root, "call"), map[string]goEdge{"Use->Run@9": {"typed", "p/p.go:Run:5"}})
 }

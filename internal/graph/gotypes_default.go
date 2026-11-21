@@ -25,11 +25,13 @@ import (
 
 const goTypesEnabled = true
 
-// The type pass stops starting packages after this much time so the index
-// deadline still covers the database work that follows. Packages it did not
-// reach keep their syntax evidence, which is never less conservative.
+// The type pass stops starting packages after its own budget, or earlier so
+// that goTypeReserve remains before the index deadline for the database work
+// that follows. Packages it did not reach keep their syntax evidence, which
+// is never less conservative, and the pass is recorded as partial.
 const (
 	goTypeTimeBudget  = 20 * time.Second
+	goTypeReserve     = 15 * time.Second
 	goDispatchPerCall = 32
 	goDispatchLimit   = 100000
 	goEmbeddingLimit  = 4096
@@ -103,9 +105,13 @@ func resolveGoTypes(ctx context.Context, tx *sql.Tx, repo, module string, source
 	if overBudget {
 		return goTypeStats{Status: "skipped", Reason: "go_source_budget"}, nil
 	}
+	stop := time.Now().Add(goTypeTimeBudget)
+	if deadline, ok := ctx.Deadline(); ok && deadline.Add(-goTypeReserve).Before(stop) {
+		stop = deadline.Add(-goTypeReserve)
+	}
 	pass := &goTypePass{
 		ctx:       ctx,
-		stop:      time.Now().Add(goTypeTimeBudget),
+		stop:      stop,
 		fset:      token.NewFileSet(),
 		byPath:    map[string]*goTypePackage{},
 		decls:     map[token.Pos]*goDecl{},
