@@ -227,3 +227,76 @@ func new(int) T{return T{}}
 		t.Fatalf("guessed cyclic/shadowed edges: %d observed %d resolved", observed, resolved)
 	}
 }
+
+// Methods cannot be declared on function-local types, so a local type that
+// reuses a package-level type's name is different evidence. The local T below
+// embeds U: x.Run() calls the promoted U.Run, but the resolver used to emit a
+// false edge to the package-level T.Run.
+func TestRegressionFunctionLocalTypesAreNotPackageReceivers(t *testing.T) {
+	source := `package p
+type T struct{}
+func (T) Run(){}
+type U struct{}
+func (U) Run(){}
+func Local(){
+	type T struct{ U }
+	var x T
+	x.Run()
+	y := T{}
+	y.Run()
+	T{}.Run()
+	type A = U
+	var z A
+	z.Run()
+}
+`
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "p.go", source, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := &types.Info{Selections: map[*ast.SelectorExpr]*types.Selection{}}
+	if _, err := new(types.Config).Check("p", fset, []*ast.File{file}, info); err != nil {
+		t.Fatalf("invalid oracle fixture: %v", err)
+	}
+	oracle := map[int]string{}
+	for sel, selection := range info.Selections {
+		recv := selection.Obj().(*types.Func).Type().(*types.Signature).Recv().Type()
+		oracle[fset.Position(sel.Pos()).Line] = recv.(*types.Named).Obj().Name()
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "p.go"), []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := AnalyzeRepo(root, db); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(`SELECT r.line,coalesce(s.receiver,'') FROM relations r JOIN relation_targets t ON t.relation_id=r.id LEFT JOIN symbol_receivers s ON s.symbol_id=t.to_id WHERE r.from_symbol='Local' AND r.to_symbol='Run'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	observed := 0
+	for rows.Next() {
+		var line int
+		var receiver string
+		if err := rows.Scan(&line, &receiver); err != nil {
+			t.Fatal(err)
+		}
+		observed++
+		if receiver != "" && receiver != oracle[line] {
+			t.Errorf("line %d: edge to %s.Run, type checker selects %s.Run", line, receiver, oracle[line])
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if observed != 4 {
+		t.Fatalf("observed %d calls, want 4", observed)
+	}
+}

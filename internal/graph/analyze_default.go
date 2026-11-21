@@ -127,7 +127,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 				id, repo, rel, d.Name.Name, kind, line, goSignature(fset, d))
 			db.content(repo, id, src[position(d.Pos()).Offset:position(d.End()).Offset], position(d.End()).Line)
 			if d.Recv != nil && len(d.Recv.List) == 1 {
-				if receiver := declaredTypeName(d.Recv.List[0].Type); receiver != "" && db.err == nil {
+				if receiver := declaredTypeName(file.Scope, d.Recv.List[0].Type); receiver != "" && db.err == nil {
 					_, _ = db.write("INSERT INTO symbol_receivers(symbol_id,receiver) VALUES(?,?) ON CONFLICT(symbol_id) DO UPDATE SET receiver=excluded.receiver", scopedID(repo, id), receiver)
 				}
 			}
@@ -159,7 +159,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 						}
 					}
 					if hint == "unresolved" {
-						if receiver := receiverType(fn.X); receiver != "" {
+						if receiver := receiverType(file.Scope, fn.X); receiver != "" {
 							hint = "receiver:" + receiver
 						}
 					}

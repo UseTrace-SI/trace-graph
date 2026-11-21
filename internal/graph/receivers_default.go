@@ -9,21 +9,24 @@ import "go/ast"
 // factory returns, embedded promotion and dynamic dispatch stay unresolved.
 const receiverEvidenceDepth = 32
 
-func declaredTypeName(expr ast.Expr) string { return localTypeName(expr, 0) }
+// scope is the file's package scope. Methods can only be declared on
+// package-level types, so a function-local type that reuses a package-level
+// type's name is not evidence for that type's methods.
+func declaredTypeName(scope *ast.Scope, expr ast.Expr) string { return localTypeName(scope, expr, 0) }
 
-func localTypeName(expr ast.Expr, depth int) string {
+func localTypeName(scope *ast.Scope, expr ast.Expr, depth int) string {
 	if depth >= receiverEvidenceDepth {
 		return ""
 	}
 	switch x := expr.(type) {
 	case *ast.StarExpr:
-		return localTypeName(x.X, depth+1)
+		return localTypeName(scope, x.X, depth+1)
 	case *ast.ParenExpr:
-		return localTypeName(x.X, depth+1)
+		return localTypeName(scope, x.X, depth+1)
 	case *ast.IndexExpr:
-		return localTypeName(x.X, depth+1)
+		return localTypeName(scope, x.X, depth+1)
 	case *ast.IndexListExpr:
-		return localTypeName(x.X, depth+1)
+		return localTypeName(scope, x.X, depth+1)
 	case *ast.Ident:
 		if x.Obj != nil {
 			spec, ok := x.Obj.Decl.(*ast.TypeSpec)
@@ -31,7 +34,10 @@ func localTypeName(expr ast.Expr, depth int) string {
 				return ""
 			}
 			if spec.Assign.IsValid() {
-				return localTypeName(spec.Type, depth+1)
+				return localTypeName(scope, spec.Type, depth+1)
+			}
+			if scope == nil || scope.Lookup(x.Name) != x.Obj {
+				return ""
 			}
 			return x.Name
 		}
@@ -42,27 +48,27 @@ func localTypeName(expr ast.Expr, depth int) string {
 	return ""
 }
 
-func receiverType(expr ast.Expr) string { return localReceiverType(expr, 0) }
+func receiverType(scope *ast.Scope, expr ast.Expr) string { return localReceiverType(scope, expr, 0) }
 
-func localReceiverType(expr ast.Expr, depth int) string {
+func localReceiverType(scope *ast.Scope, expr ast.Expr, depth int) string {
 	if depth >= receiverEvidenceDepth {
 		return ""
 	}
 	switch x := expr.(type) {
 	case *ast.ParenExpr:
-		return localReceiverType(x.X, depth+1)
+		return localReceiverType(scope, x.X, depth+1)
 	case *ast.UnaryExpr:
 		if x.Op.String() == "&" {
-			return localReceiverType(x.X, depth+1)
+			return localReceiverType(scope, x.X, depth+1)
 		}
 	case *ast.CompositeLit:
-		return localTypeName(x.Type, depth+1)
+		return localTypeName(scope, x.Type, depth+1)
 	case *ast.CallExpr:
 		// Only conversions whose identifier is a locally declared type supply
 		// evidence. Even new(T) may be a package-level function in another file.
 		if identifier := localTypeIdentifier(x.Fun); identifier != nil && identifier.Obj != nil {
 			if _, ok := identifier.Obj.Decl.(*ast.TypeSpec); ok {
-				return localTypeName(x.Fun, depth+1)
+				return localTypeName(scope, x.Fun, depth+1)
 			}
 		}
 	case *ast.Ident:
@@ -71,15 +77,15 @@ func localReceiverType(expr ast.Expr, depth int) string {
 		}
 		switch decl := x.Obj.Decl.(type) {
 		case *ast.Field:
-			return localTypeName(decl.Type, depth+1)
+			return localTypeName(scope, decl.Type, depth+1)
 		case *ast.ValueSpec:
 			if decl.Type != nil {
-				return localTypeName(decl.Type, depth+1)
+				return localTypeName(scope, decl.Type, depth+1)
 			}
 			if len(decl.Names) == len(decl.Values) {
 				for index, name := range decl.Names {
 					if name.Obj == x.Obj {
-						return localReceiverType(decl.Values[index], depth+1)
+						return localReceiverType(scope, decl.Values[index], depth+1)
 					}
 				}
 			}
@@ -87,12 +93,12 @@ func localReceiverType(expr ast.Expr, depth int) string {
 			if len(decl.Lhs) == len(decl.Rhs) {
 				for index, left := range decl.Lhs {
 					if name, ok := left.(*ast.Ident); ok && name.Obj == x.Obj {
-						return localReceiverType(decl.Rhs[index], depth+1)
+						return localReceiverType(scope, decl.Rhs[index], depth+1)
 					}
 				}
 			}
 		case *ast.TypeSpec:
-			return localTypeName(x, depth+1)
+			return localTypeName(scope, x, depth+1)
 		}
 	}
 	return ""
