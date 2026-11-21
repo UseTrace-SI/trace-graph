@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS symbol_receivers(symbol_id TEXT PRIMARY KEY REFERENCE
 CREATE TABLE IF NOT EXISTS relation_targets(relation_id TEXT PRIMARY KEY REFERENCES relations(id) ON DELETE CASCADE,from_id TEXT NOT NULL,to_id TEXT,namespace TEXT NOT NULL,hint TEXT NOT NULL,resolution TEXT NOT NULL DEFAULT 'unresolved');
 CREATE INDEX IF NOT EXISTS relation_targets_from ON relation_targets(from_id);
 CREATE INDEX IF NOT EXISTS relation_targets_to ON relation_targets(to_id);
+CREATE TABLE IF NOT EXISTS repo_resolution(repo TEXT PRIMARY KEY,complete INTEGER NOT NULL,detail TEXT NOT NULL);
 
 `
 	if _, err := tx.Exec(schema); err != nil {

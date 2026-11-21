@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -18,13 +20,13 @@ import (
 // indexWriter preserves the first database error, including writes made from
 // parser callbacks. The surrounding transaction is never committed on failure.
 type indexWriter struct {
-	tx              *sql.Tx
-	err             error
-	namespace       string
-	moduleOverride  *string
-	maxRecords      int
-	records         int
-	symbolIDs       map[string]bool
+	tx             *sql.Tx
+	err            error
+	namespace      string
+	moduleOverride *string
+	maxRecords     int
+	records        int
+	symbolIDs      map[string]bool
 }
 
 // write is the single counted write path. Symbol metadata rows must share the
@@ -181,8 +183,11 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	defer tx.Rollback()
 	w := &indexWriter{tx: tx}
 	seen := map[string]bool{}
-	n := 0
+	n, analyzed := 0, 0
 	var totalBytes int64
+	// Every Go file, cached or not, takes part in package-wide type checking.
+	var goSources []goSource
+	goBytes, goOverBudget := 0, false
 	err = walkSourcesContext(ctx, root, func(rel string, f *os.File) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -204,7 +209,15 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if totalBytes > 512*1024*1024 {
 			return fmt.Errorf("repository sources exceed 512 MiB")
 		}
-		digest := fmt.Sprintf("%s:%s:%x", analyzerVersion, modDigest, sha256.Sum256(src))
+		if goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go") {
+			if goBytes += len(src); goBytes > goTypeSourceBudget {
+				goOverBudget, goSources = true, nil
+			} else if !goOverBudget {
+				goSources = append(goSources, goSource{rel: rel, src: src})
+			}
+		}
+		// Type-checked resolution follows the platform's build constraints.
+		digest := fmt.Sprintf("%s@%s/%s:%s:%x", analyzerVersion, runtime.GOOS, runtime.GOARCH, modDigest, sha256.Sum256(src))
 		var old string
 		err = tx.QueryRowContext(ctx, "SELECT digest FROM file_cache_v2 WHERE repo=? AND path=?", root, rel).Scan(&old)
 		if err != nil && err != sql.ErrNoRows {
@@ -227,6 +240,7 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 			return err
 		}
 		n += count
+		analyzed++
 		return nil
 	})
 	if err != nil {
@@ -257,7 +271,7 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 			return 0, err
 		}
 	}
-	if err := resolveCalls(ctx, tx, root); err != nil {
+	if err := resolveRepository(ctx, tx, root, analyzed > 0 || len(deleted) > 0, goSources, goOverBudget); err != nil {
 		return 0, err
 	}
 	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
@@ -297,6 +311,43 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		return 0, err
 	}
 	return n, nil
+}
+
+// resolveRepository recomputes every relation target of a generation. With
+// no changed or deleted file, a complete previous pass is still exact, so an
+// unchanged refresh skips the work.
+func resolveRepository(ctx context.Context, tx *sql.Tx, root string, changed bool, goSources []goSource, goOverBudget bool) error {
+	if !changed {
+		var complete int
+		err := tx.QueryRowContext(ctx, "SELECT complete FROM repo_resolution WHERE repo=?", root).Scan(&complete)
+		if err == nil && complete == 1 {
+			return nil
+		}
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+	}
+	// Type-derived edges depend on other files, so they are always rebuilt.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM relations WHERE repo=? AND kind IN ('implements','dispatch')", root); err != nil {
+		return err
+	}
+	if err := resolveCalls(ctx, tx, root); err != nil {
+		return err
+	}
+	stats, err := resolveGoTypes(ctx, tx, root, moduleName(root), goSources, goOverBudget)
+	if err != nil {
+		return fmt.Errorf("resolving Go types: %w", err)
+	}
+	detail, err := json.Marshal(stats)
+	if err != nil {
+		return err
+	}
+	complete := 1
+	if stats.Status == "partial" {
+		complete = 0
+	}
+	_, err = tx.ExecContext(ctx, "INSERT INTO repo_resolution(repo,complete,detail) VALUES(?,?,?) ON CONFLICT(repo) DO UPDATE SET complete=excluded.complete,detail=excluded.detail", root, complete, string(detail))
+	return err
 }
 
 func removeFile(tx *sql.Tx, repo, path string) error {

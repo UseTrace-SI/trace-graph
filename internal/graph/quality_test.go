@@ -32,11 +32,13 @@ func TestQualifiedCallsDoNotMixPackagesOrMethods(t *testing.T) {
 	if _, err := AnalyzeRepo(root, db); err != nil {
 		t.Fatal(err)
 	}
+	// Module-local packages are type-checked from source, so every call here
+	// has a checker-certain target.
 	var resolved, unresolved int
-	if err := db.QueryRow("SELECT count(*) FROM relation_targets WHERE resolution='lexical'").Scan(&resolved); err != nil {
+	if err := db.QueryRow("SELECT count(*) FROM relation_targets t JOIN relations r ON r.id=t.relation_id WHERE r.kind='call' AND t.resolution='typed' AND t.to_id IS NOT NULL").Scan(&resolved); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT count(*) FROM relation_targets WHERE resolution='unresolved' AND to_id IS NULL").Scan(&unresolved); err != nil {
+	if err := db.QueryRow("SELECT count(*) FROM relation_targets t JOIN relations r ON r.id=t.relation_id WHERE r.kind='call' AND t.to_id IS NULL").Scan(&unresolved); err != nil {
 		t.Fatal(err)
 	}
 	if resolved != 4 || unresolved != 0 {

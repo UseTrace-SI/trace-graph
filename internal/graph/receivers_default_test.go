@@ -42,14 +42,23 @@ func Generic[T interface{Run()}](value T){value.Run()}
 		t.Fatal(err)
 	}
 	var resolved, unresolved int
-	if err := db.QueryRow("SELECT count(*) FROM relation_targets WHERE to_id IS NOT NULL").Scan(&resolved); err != nil {
+	if err := db.QueryRow("SELECT count(*) FROM relation_targets t JOIN relations r ON r.id=t.relation_id WHERE r.kind='call' AND t.to_id IS NOT NULL").Scan(&resolved); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRow("SELECT count(*) FROM relation_targets WHERE to_id IS NULL").Scan(&unresolved); err != nil {
+	if err := db.QueryRow("SELECT count(*) FROM relation_targets t JOIN relations r ON r.id=t.relation_id WHERE r.kind='call' AND t.to_id IS NULL").Scan(&unresolved); err != nil {
 		t.Fatal(err)
 	}
+	// The interface call and the type-parameter call stay unresolved.
 	if resolved != 6 || unresolved != 2 {
 		t.Fatalf("guessed receiver edges: %d resolved, %d unresolved", resolved, unresolved)
+	}
+	// Both concrete types satisfy I; the interface call may reach either
+	// implementation, which is recorded as dispatch rather than as a call.
+	for kind, want := range map[string]int{"implements": 2, "dispatch": 2} {
+		var n int
+		if err := db.QueryRow("SELECT count(*) FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.kind=? AND t.to_id IS NOT NULL", kind).Scan(&n); err != nil || n != want {
+			t.Fatalf("%s edges: %d %v, want %d", kind, n, err, want)
+		}
 	}
 	var wrong int
 	if err := db.QueryRow(`SELECT count(*) FROM relations r JOIN relation_targets t ON t.relation_id=r.id JOIN symbol_receivers s ON s.symbol_id=t.to_id WHERE r.from_symbol='Explicit' AND r.line=8 AND s.receiver NOT IN ('T','U')`).Scan(&wrong); err != nil || wrong != 0 {
@@ -165,12 +174,56 @@ func Generic[T interface{Run()}](value T){value.Run()}
 	if !reflect.DeepEqual(actual, expected) || len(actual) != 14 {
 		t.Fatalf("edges disagree with Go type checker: got %v want %v", actual, expected)
 	}
-	var dynamicResolved, dynamicObserved int
-	if err := db.QueryRow(`SELECT count(*),count(t.to_id) FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.from_symbol IN ('Dynamic','Generic') AND r.to_symbol='Run'`).Scan(&dynamicObserved, &dynamicResolved); err != nil {
+	// Factory returns and new(T) are certain to the type checker and resolve;
+	// the interface and type-parameter calls are dynamic and stay unresolved.
+	dynamicWant := map[string]string{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || (fn.Name.Name != "Dynamic" && fn.Name.Name != "Generic") {
+			continue
+		}
+		ast.Inspect(fn.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Run" {
+				return true
+			}
+			pos := fset.Position(call.Pos())
+			key := fmt.Sprintf("%d:%d", pos.Line, pos.Column)
+			recv := info.Selections[sel].Obj().(*types.Func).Type().(*types.Signature).Recv().Type()
+			if types.IsInterface(recv) {
+				dynamicWant[key] = ""
+				return true
+			}
+			if pointer, ok := recv.(*types.Pointer); ok {
+				recv = pointer.Elem()
+			}
+			dynamicWant[key] = recv.(*types.Named).Obj().Name()
+			return true
+		})
+	}
+	rows, err = db.Query(`SELECT r.line,t.relation_id,coalesce(s.receiver,'') FROM relations r JOIN relation_targets t ON t.relation_id=r.id LEFT JOIN symbol_receivers s ON s.symbol_id=t.to_id WHERE r.kind='call' AND r.from_symbol IN ('Dynamic','Generic') AND r.to_symbol='Run'`)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if dynamicObserved != 4 || dynamicResolved != 0 {
-		t.Fatalf("guessed dynamic/factory/builtin edges: %d observed %d resolved", dynamicObserved, dynamicResolved)
+	dynamicGot := map[string]string{}
+	for rows.Next() {
+		var line int
+		var id, receiver string
+		if err := rows.Scan(&line, &id, &receiver); err != nil {
+			t.Fatal(err)
+		}
+		dynamicGot[fmt.Sprintf("%d:%s", line, id[strings.LastIndex(id, ":")+1:])] = receiver
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if !reflect.DeepEqual(dynamicGot, dynamicWant) || len(dynamicGot) != 4 {
+		t.Fatalf("dynamic/factory/builtin edges disagree with Go type checker: got %v want %v", dynamicGot, dynamicWant)
 	}
 	// Alias-only changes invalidate cached receiver evidence even with unchanged
 	// callers. All aliases in this file must now resolve to the U method.
@@ -190,7 +243,10 @@ func Generic[T interface{Run()}](value T){value.Run()}
 	}
 }
 
-func TestReceiverEvidenceCyclesAndCrossFileShadowsRemainUnresolved(t *testing.T) {
+// Cyclic alias and initializer evidence is invalid to the type checker too
+// and stays unresolved. The package-level new in another file shadows the
+// builtin; syntax evidence could not see it, the package-wide check does.
+func TestReceiverEvidenceCyclesRemainUnresolvedAndCrossFileShadowsAreChecked(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
 		"p.go": `package p
@@ -219,12 +275,15 @@ func new(int) T{return T{}}
 	if _, err := AnalyzeRepo(root, db); err != nil {
 		t.Fatal(err)
 	}
-	var observed, resolved int
-	if err := db.QueryRow(`SELECT count(*),count(t.to_id) FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.from_symbol='Unknown' AND r.to_symbol='Run'`).Scan(&observed, &resolved); err != nil {
+	var observed, resolved, shadow int
+	if err := db.QueryRow(`SELECT count(*),count(t.to_id) FROM relations r JOIN relation_targets t ON t.relation_id=r.id WHERE r.kind='call' AND r.from_symbol='Unknown' AND r.to_symbol='Run'`).Scan(&observed, &resolved); err != nil {
 		t.Fatal(err)
 	}
-	if observed != 3 || resolved != 0 {
-		t.Fatalf("guessed cyclic/shadowed edges: %d observed %d resolved", observed, resolved)
+	if err := db.QueryRow(`SELECT count(*) FROM relations r JOIN relation_targets t ON t.relation_id=r.id JOIN symbol_receivers s ON s.symbol_id=t.to_id WHERE r.kind='call' AND r.from_symbol='Unknown' AND r.to_symbol='Run' AND s.receiver='T' AND t.resolution='typed' AND t.relation_id LIKE '%:8:39'`).Scan(&shadow); err != nil {
+		t.Fatal(err)
+	}
+	if observed != 3 || resolved != 1 || shadow != 1 {
+		t.Fatalf("guessed cyclic edges or missed the checked shadow: %d observed %d resolved %d shadow", observed, resolved, shadow)
 	}
 }
 
