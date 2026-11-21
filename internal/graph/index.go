@@ -27,6 +27,8 @@ type indexWriter struct {
 	maxRecords     int
 	records        int
 	symbolIDs      map[string]bool
+	// shapes collects rename evidence during revision analysis only.
+	shapes map[string]symbolShape
 }
 
 // write is the single counted write path. Symbol metadata rows must share the
@@ -104,6 +106,11 @@ func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
 		return
 	}
 	_, _ = w.write("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
+	if w.shapes != nil && w.err == nil {
+		if file, name := splitSymbolID(id); renameShapeLanguage(file) {
+			w.shapes[scopedID(repo, id)] = shapeOf(shapeLanguage(file), name, src)
+		}
+	}
 }
 
 func filepathExt(path string) string { return filepath.Ext(path) }

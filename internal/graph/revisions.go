@@ -48,6 +48,7 @@ type RevisionStats struct {
 	SourceBytes  int64 `json:"source_bytes"`
 	sources      []revisionSource
 	paths        map[string]bool
+	shapes       map[string]symbolShape
 }
 
 // Git flags are probed once so an older Git is not handed an option it cannot
@@ -481,7 +482,7 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 			return stats, err
 		}
 	}
-	writer := &indexWriter{tx: tx, moduleOverride: &module, maxRecords: 100000}
+	writer := &indexWriter{tx: tx, moduleOverride: &module, maxRecords: 100000, shapes: map[string]symbolShape{}}
 	for _, entry := range selected.entries {
 		if err := ctx.Err(); err != nil {
 			return stats, err
@@ -524,5 +525,6 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 		return stats, err
 	}
 	stats.Observations = writer.records
+	stats.shapes = writer.shapes
 	return stats, nil
 }

@@ -1,7 +1,9 @@
 package graph
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -66,5 +68,60 @@ func TestRegressionExactFileRenameOrderIsDeterministic(t *testing.T) {
 	want := []FileRename{{From: "a.go", To: "new-a.go", SourceHash: "z"}, {From: "z.go", To: "new-z.go", SourceHash: "a"}}
 	if !reflect.DeepEqual(renames, want) {
 		t.Fatalf("unstable order: %+v", renames)
+	}
+}
+
+func TestSymbolRenamesPairByNormalizedBody(t *testing.T) {
+	body := func(name, extra string) string {
+		return "func " + name + "(a, b int) int {\n\tsum := a + b // total\n\tif sum > 10 {\n\t\treturn " + name + "(sum-10, 0)\n\t}\n" + extra + "\treturn sum * 2\n}"
+	}
+	type side struct{ id, name, kind, src string }
+	for _, tc := range []struct {
+		test           string
+		removed, added []side
+		want           string
+	}{
+		{"identical body, recursive self-reference renamed", []side{{"b1", "Old", "func", body("Old", "")}}, []side{{"h1", "New", "func", body("New", "")}}, "b1->h1 identical_body 1"},
+		{"comments and layout do not matter", []side{{"b1", "Old", "func", body("Old", "")}}, []side{{"h1", "New", "func", strings.ReplaceAll(strings.ReplaceAll(body("New", ""), "// total", "/* moved */"), "\n\t", "\n  ")}}, "b1->h1 identical_body 1"},
+		{"small identical body has lower confidence", []side{{"b1", "Old", "func", "func Old() {}"}}, []side{{"h1", "New", "func", "func New() {}"}}, "b1->h1 identical_body 0.75"},
+		{"duplicate identical bodies stay ambiguous", []side{{"b1", "A", "func", body("A", "")}, {"b2", "B", "func", body("B", "")}}, []side{{"h1", "C", "func", body("C", "")}, {"h2", "D", "func", body("D", "")}}, "ambiguous"},
+		{"edited body pairs by similarity", []side{{"b1", "Old", "func", body("Old", "")}}, []side{{"h1", "New", "func", body("New", "\tlog(sum)\n")}}, "b1->h1 similar_body"},
+		{"different bodies do not pair", []side{{"b1", "Old", "func", body("Old", "")}}, []side{{"h1", "New", "func", "func New(path string) error {\n\tfile, err := open(path)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn file.Close()\n}"}}, ""},
+		{"same name is not a rename", []side{{"b1", "Same", "func", body("Same", "")}}, []side{{"h1", "Same", "func", body("Same", "")}}, ""},
+		{"different kinds do not pair", []side{{"b1", "Old", "func", body("Old", "")}}, []side{{"h1", "New", "method", body("New", "")}}, ""},
+	} {
+		t.Run(tc.test, func(t *testing.T) {
+			base := RevisionStats{shapes: map[string]symbolShape{}}
+			head := RevisionStats{shapes: map[string]symbolShape{}}
+			var removed, added []RenameSymbol
+			for _, s := range tc.removed {
+				base.shapes[s.id] = shapeOf("go", s.name, []byte(s.src))
+				removed = append(removed, RenameSymbol{ID: s.id, File: "p.go", Name: s.name, Kind: s.kind, SignatureShape: SignatureShape(s.name, "func "+s.name+"(a, b int) int")})
+			}
+			for _, s := range tc.added {
+				head.shapes[s.id] = shapeOf("go", s.name, []byte(s.src))
+				added = append(added, RenameSymbol{ID: s.id, File: "q.go", Name: s.name, Kind: s.kind, SignatureShape: SignatureShape(s.name, "func "+s.name+"(a, b int) int")})
+			}
+			renames, ambiguous, checked := SymbolRenames(base, head, removed, added)
+			if !checked {
+				t.Fatal("similarity was skipped")
+			}
+			var got []string
+			for _, r := range renames {
+				entry := fmt.Sprintf("%s->%s %s", r.FromID, r.ToID, r.Evidence)
+				if r.Evidence == "identical_body" {
+					entry += fmt.Sprintf(" %g", r.Confidence)
+				} else if r.Confidence < 0.7 || r.Confidence >= 1 || !r.SignatureMatch {
+					t.Fatalf("similar rename confidence out of range: %+v", r)
+				}
+				got = append(got, entry)
+			}
+			if len(ambiguous) > 0 {
+				got = append(got, "ambiguous")
+			}
+			if strings.Join(got, ",") != tc.want {
+				t.Fatalf("renames %q, want %q (%+v)", strings.Join(got, ","), tc.want, renames)
+			}
+		})
 	}
 }
