@@ -17,7 +17,7 @@ import (
 // imported one, a member reached through an imported or same-file module or
 // type, or a statically bound member of the caller's own class.
 func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
-	r := &lexResolver{files: map[string]bool{}, byFile: map[string][]lexSymbol{}, bindings: map[string]map[string]lexBinding{}}
+	r := &lexResolver{files: map[string]bool{}, suffixes: map[string][]string{}, names: map[string]map[string][]lexSymbol{}, ids: map[string]lexSymbol{}, bindings: map[string]map[string]lexBinding{}}
 	rows, err := tx.QueryContext(ctx, "SELECT path FROM file_cache_v2 WHERE repo=?", repo)
 	if err != nil {
 		return err
@@ -29,6 +29,8 @@ func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
 			return err
 		}
 		r.files[path] = true
+		key := suffixKey(path)
+		r.suffixes[key] = append(r.suffixes[key], path)
 	}
 	if err := closeRows(rows); err != nil {
 		return err
@@ -54,7 +56,11 @@ func resolveLexical(ctx context.Context, tx *sql.Tx, repo string) error {
 		} else {
 			continue
 		}
-		r.byFile[sym.file] = append(r.byFile[sym.file], sym)
+		if r.names[sym.file] == nil {
+			r.names[sym.file] = map[string][]lexSymbol{}
+		}
+		r.names[sym.file][sym.name] = append(r.names[sym.file][sym.name], sym)
+		r.ids[sym.id] = sym
 	}
 	if err := closeRows(rows); err != nil {
 		return err
@@ -181,17 +187,29 @@ type lexBinding struct {
 	conflict       bool
 }
 
+// lexResolver indexes files by their last two path components and symbols
+// by file, name and identity, so each lookup is proportional to its matches.
 type lexResolver struct {
 	files    map[string]bool
-	byFile   map[string][]lexSymbol
+	suffixes map[string][]string
+	names    map[string]map[string][]lexSymbol
+	ids      map[string]lexSymbol
 	bindings map[string]map[string]lexBinding
+}
+
+func suffixKey(path string) string {
+	parts := strings.Split(path, "/")
+	if len(parts) > 2 {
+		parts = parts[len(parts)-2:]
+	}
+	return strings.Join(parts, "/")
 }
 
 // unique returns the only symbol in file named name that satisfies accept.
 func (r *lexResolver) unique(file, name string, accept func(lexSymbol) bool) string {
 	found := ""
-	for _, sym := range r.byFile[file] {
-		if sym.name == name && accept(sym) {
+	for _, sym := range r.names[file][name] {
+		if accept(sym) {
 			if found != "" {
 				return ""
 			}
@@ -205,10 +223,8 @@ func moduleLevel(sym lexSymbol) bool { return sym.container == "" }
 
 func (r *lexResolver) symbolAt(file, name string, line int) string {
 	id := goSymbolID(file, name, line)
-	for _, sym := range r.byFile[file] {
-		if sym.id == id {
-			return id
-		}
+	if _, ok := r.ids[id]; ok {
+		return id
 	}
 	return ""
 }
@@ -226,8 +242,8 @@ func (r *lexResolver) firstFile(candidates ...string) string {
 // given path.
 func (r *lexResolver) uniqueSuffix(paths ...string) string {
 	found := ""
-	for file := range r.files {
-		for _, path := range paths {
+	for _, path := range paths {
+		for _, file := range r.suffixes[suffixKey(path)] {
 			if file == path || strings.HasSuffix(file, "/"+path) {
 				if found != "" && found != file {
 					return ""
@@ -257,10 +273,8 @@ func (r *lexResolver) resolveImport(lang, from, specifier, imported, kind string
 	}
 	if symbol := r.unique(module, imported, moduleLevel); symbol != "" {
 		binding := lexBinding{symbol: symbol}
-		for _, sym := range r.byFile[module] {
-			if sym.id == symbol && sym.kind == "type" {
-				binding.module, binding.member = module, imported
-			}
+		if r.ids[symbol].kind == "type" {
+			binding.module, binding.member = module, imported
 		}
 		return binding
 	}
@@ -451,12 +465,8 @@ func (r *lexResolver) javaImport(specifier, imported, kind string) lexBinding {
 }
 
 func (r *lexResolver) kindOf(id string, accept func(lexSymbol) bool) bool {
-	for _, sym := range r.byFile[symbolFile(id)] {
-		if sym.id == id {
-			return accept(sym)
-		}
-	}
-	return false
+	sym, ok := r.ids[id]
+	return ok && accept(sym)
 }
 
 // resolveName resolves a call, route handler or type reference, in order:
@@ -532,12 +542,4 @@ func (r *lexResolver) resolveName(lang, file, qualifier, name, callerContainer s
 		return r.unique(class, name, member(qualifier))
 	}
 	return ""
-}
-
-func symbolFile(id string) string {
-	parts := strings.Split(id, ":")
-	if len(parts) < 3 {
-		return ""
-	}
-	return strings.Join(parts[:len(parts)-2], ":")
 }

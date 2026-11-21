@@ -29,6 +29,7 @@ type lexDecl struct {
 	static                bool // statically bound member
 	supers                []lexSuper
 	locals                map[string]bool
+	bodyDepth             int // brace depth before the body opens
 	id                    string
 }
 
@@ -172,14 +173,24 @@ func lexContent(s *lexSource, hashText string, d *lexDecl) []byte {
 
 // lexDeclarations finds declarations line by line. Member patterns apply
 // only directly inside a class/impl body; a declaration inside a function
-// body is local.
+// body is local. Bodies nest or are disjoint, so the enclosing bodies of the
+// current line form a stack and the whole scan stays linear.
 func lexDeclarations(lang string, s *lexSource) []*lexDecl {
-	depth := braceDepths(s)
-	var decls, scopes []*lexDecl
+	depths := lineDepths(s)
+	var decls, scopes, open []*lexDecl
 	seen := map[string]bool{}
+	push := func(d *lexDecl) {
+		if d.bodyStart >= 0 {
+			d.bodyDepth = depthAt(s, depths, d.bodyStart)
+			open = append(open, d)
+		}
+	}
 	for line := 1; line <= len(s.lines); line++ {
 		text := s.lineText(line)
 		start := s.lines[line-1]
+		for len(open) > 0 && open[len(open)-1].bodyEnd <= start {
+			open = open[:len(open)-1]
+		}
 		if lang == "rust" {
 			if m := rustImpl.FindStringSubmatch(text); m != nil {
 				impl := &lexDecl{name: lastPathSegment(m[2]), kind: "impl", offset: start, line: line, scope: true}
@@ -189,8 +200,24 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 					impl.supers = append(impl.supers, lexSuper{kind: "implements", qualifier: qualifier, name: name})
 				}
 				scopes = append(scopes, impl)
+				push(impl)
 				continue
 			}
+		}
+		var enclosing, scope *lexDecl
+		for i := len(open) - 1; i >= 0; i-- {
+			if open[i].bodyStart < start && start < open[i].bodyEnd {
+				if enclosing == nil {
+					enclosing = open[i]
+				}
+				if open[i].scope {
+					scope = open[i]
+					break
+				}
+			}
+		}
+		if scope != nil && lang != "python" && depths[line-1] != scope.bodyDepth+1 {
+			scope = nil // nested deeper, for example inside a method body
 		}
 		for _, p := range lexPatterns[lang] {
 			m := p.re.FindStringSubmatchIndex(text)
@@ -201,7 +228,6 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 			if lexKeywords[lang][name] {
 				break
 			}
-			scope := lexScope(lang, s, depth, scopes, start)
 			if p.member && scope == nil {
 				continue // a method shape outside a class body is a call
 			}
@@ -218,7 +244,7 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 					d.static = lexStaticWord.MatchString(text[:m[2]])
 				}
 			}
-			if enclosing := innermost(decls, start); enclosing != nil && enclosing.callable && (scope == nil || enclosing.bodyStart > scope.bodyStart) {
+			if enclosing != nil && enclosing.callable && (scope == nil || enclosing.bodyStart > scope.bodyStart) {
 				d.container, d.static = lexLocalContainer, false
 			}
 			if lang == "python" {
@@ -236,49 +262,56 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 			if d.scope {
 				scopes = append(scopes, d)
 			}
+			push(d)
 			break
 		}
 	}
+	assigned := lexAssignments(lang, s)
 	for _, d := range decls {
-		if d.callable && d.container == "" && lexReassigned(lang, s, d) {
-			// A reassigned binding holds a function value: calls through it
-			// are dynamic, so it is never a resolution target.
-			d.container = lexLocalContainer
-		}
-	}
-	for _, scope := range scopes {
-		if scope.kind == "impl" && len(scope.supers) > 0 {
-			// `impl Trait for Type` relates Type to Trait.
-			for _, d := range decls {
-				if d.kind == "type" && d.name == scope.name && d.container == "" {
-					d.supers = append(d.supers, scope.supers...)
+		if d.callable && d.container == "" {
+			for _, line := range assigned[d.name] {
+				if line != d.line {
+					// A reassigned binding holds a function value: calls
+					// through it are dynamic, so it is never a target.
+					d.container = lexLocalContainer
 					break
 				}
 			}
+		}
+	}
+	types := map[string]*lexDecl{}
+	for _, d := range decls {
+		if d.kind == "type" && d.container == "" && types[d.name] == nil {
+			types[d.name] = d
+		}
+	}
+	for _, scope := range scopes {
+		if scope.kind == "impl" && len(scope.supers) > 0 && types[scope.name] != nil {
+			// `impl Trait for Type` relates Type to Trait.
+			types[scope.name].supers = append(types[scope.name].supers, scope.supers...)
 		}
 	}
 	sort.SliceStable(decls, func(i, j int) bool { return decls[i].offset < decls[j].offset })
 	return decls
 }
 
-// lexReassigned reports an assignment to a module-level callable's name
-// elsewhere in the file (`let f = () => {}` later set to another function).
-func lexReassigned(lang string, s *lexSource, d *lexDecl) bool {
-	var pattern string
-	switch lang {
-	case "javascript", "typescript":
-		pattern = `(?m)(?:^|[^.\w$])` + regexp.QuoteMeta(d.name) + `\s*(?:[-+*/|&]|\?\?|\|\||&&)?=(?:[^=>]|$)`
-	case "python":
-		pattern = `(?m)^` + regexp.QuoteMeta(d.name) + `\s*(?::[^=\n]+)?=[^=]`
-	default:
-		return false
-	}
-	for _, m := range regexp.MustCompile(pattern).FindAllStringIndex(s.mask, -1) {
-		if line, _ := s.position(m[0]); line != d.line {
-			return true
+var lexAssignmentPatterns = map[string]*regexp.Regexp{
+	"javascript": regexp.MustCompile(`(?m)(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*(?:[-+*/|&]|\?\?|\|\||&&)?=(?:[^=>]|$)`),
+	"typescript": regexp.MustCompile(`(?m)(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*(?:[-+*/|&]|\?\?|\|\||&&)?=(?:[^=>]|$)`),
+	"python":     regexp.MustCompile(`(?m)^([A-Za-z_]\w*)\s*(?::[^=\n]+)?=[^=]`),
+}
+
+// lexAssignments maps each assigned name to the lines assigning it, in one
+// pass over the file (JavaScript/TypeScript anywhere, Python at module level).
+func lexAssignments(lang string, s *lexSource) map[string][]int {
+	assigned := map[string][]int{}
+	if pattern := lexAssignmentPatterns[lang]; pattern != nil {
+		for _, m := range pattern.FindAllStringSubmatchIndex(s.mask, -1) {
+			line, _ := s.position(m[2])
+			assigned[s.mask[m[2]:m[3]]] = append(assigned[s.mask[m[2]:m[3]]], line)
 		}
 	}
-	return false
+	return assigned
 }
 
 // javaMethodShape rejects statements that look like declarations: a member
@@ -296,30 +329,18 @@ func javaMethodShape(head, name, container string) bool {
 	return types > 0 || name == container
 }
 
-// lexScope returns the innermost class/impl/trait whose body directly
-// contains offset (Python: whose indented block contains it).
-func lexScope(lang string, s *lexSource, depth []int, scopes []*lexDecl, offset int) *lexDecl {
-	var best *lexDecl
-	for _, scope := range scopes {
-		if scope.bodyStart < 0 || offset <= scope.bodyStart || offset >= scope.bodyEnd {
-			continue
+// lineDepths records the brace depth at the start of each line.
+func lineDepths(s *lexSource) []int {
+	depths := make([]int, len(s.lines))
+	level, line := 0, 0
+	for i := 0; i <= len(s.mask); i++ {
+		for line < len(s.lines) && s.lines[line] == i {
+			depths[line] = level
+			line++
 		}
-		if lang != "python" && depth[offset] != depth[scope.bodyStart]+1 {
-			continue // nested deeper, for example inside a method body
+		if i == len(s.mask) {
+			break
 		}
-		if best == nil || scope.bodyStart > best.bodyStart {
-			best = scope
-		}
-	}
-	return best
-}
-
-// braceDepths records the brace depth at each offset of the masked source.
-func braceDepths(s *lexSource) []int {
-	depth := make([]int, len(s.mask)+1)
-	level := 0
-	for i := 0; i < len(s.mask); i++ {
-		depth[i] = level
 		switch s.mask[i] {
 		case '{':
 			level++
@@ -329,8 +350,24 @@ func braceDepths(s *lexSource) []int {
 			}
 		}
 	}
-	depth[len(s.mask)] = level
-	return depth
+	return depths
+}
+
+// depthAt is the brace depth just before offset.
+func depthAt(s *lexSource, depths []int, offset int) int {
+	line, _ := s.position(offset)
+	level := depths[line-1]
+	for i := s.lines[line-1]; i < offset; i++ {
+		switch s.mask[i] {
+		case '{':
+			level++
+		case '}':
+			if level > 0 {
+				level--
+			}
+		}
+	}
+	return level
 }
 
 // lexBody finds a declaration body after its name: the brace body that
@@ -471,6 +508,29 @@ func lexCalls(lang string, s *lexSource, decls []*lexDecl) []lexCall {
 			callables = append(callables, d)
 		}
 	}
+	// Calls arrive in offset order and callables are sorted by body start,
+	// so the bodies enclosing the current call form a stack.
+	sort.SliceStable(callables, func(i, j int) bool { return callables[i].bodyStart < callables[j].bodyStart })
+	var open []*lexDecl
+	next := 0
+	enclosing := func(offset int) *lexDecl {
+		for next < len(callables) && callables[next].bodyStart < offset {
+			open = append(open, callables[next])
+			next++
+		}
+		for i := len(open) - 1; i >= 0; i-- {
+			if open[i].bodyEnd <= offset {
+				open = append(open[:i], open[i+1:]...)
+			}
+		}
+		var best *lexDecl
+		for _, d := range open {
+			if offset > d.bodyStart && offset < d.bodyEnd && (best == nil || d.bodyStart > best.bodyStart) {
+				best = d
+			}
+		}
+		return best
+	}
 	var calls []lexCall
 	for _, m := range lexCallPatterns[lang].FindAllStringSubmatchIndex(s.mask, -1) {
 		start := m[0]
@@ -491,7 +551,7 @@ func lexCalls(lang string, s *lexSource, decls []*lexDecl) []lexCall {
 		if prefix := strings.TrimRight(s.mask[max(0, start-9):start], " \t"); strings.HasSuffix(prefix, "new") || strings.HasSuffix(prefix, "def") || strings.HasSuffix(prefix, "fn") || strings.HasSuffix(prefix, "function") || strings.HasSuffix(prefix, "class") {
 			continue
 		}
-		from := innermost(callables, start)
+		from := enclosing(start)
 		if from == nil || start < from.paramStart && name == from.name {
 			continue
 		}

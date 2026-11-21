@@ -3,8 +3,10 @@
 package graph
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func lexEdge(target string) goEdge {
@@ -185,4 +187,27 @@ func TestRegressionLexicalCommentSyntaxIsPerLanguage(t *testing.T) {
 	if err := db.QueryRow("SELECT c.source_hash FROM symbol_content c JOIN symbols s ON s.id=c.symbol_id WHERE s.repo=? AND s.name='open'", root).Scan(&after); err != nil || after == before {
 		t.Fatalf("string-literal edit kept the body hash: %v", err)
 	}
+}
+
+// Declaration, call and reassignment analysis must stay linear in the file:
+// a per-declaration regular expression over the whole file made a 568 KB,
+// 6000-function JavaScript file exceed the one-minute index deadline.
+func TestLexicalAnalysisOfLargeFilesIsLinear(t *testing.T) {
+	var src strings.Builder
+	const functions = 6000
+	for i := 0; i < functions; i++ {
+		fmt.Fprintf(&src, "export function f%d(a, b) {\n  const x = a + b;\n  helper(x);\n  return f%d(x, b);\n}\n", i, (i+1)%functions)
+	}
+	start := time.Now()
+	s := newLexSource("javascript", src.String())
+	decls := lexDeclarations("javascript", s)
+	calls := lexCalls("javascript", s, decls)
+	elapsed := time.Since(start)
+	if len(decls) != functions || len(calls) != 2*functions {
+		t.Fatalf("%d declarations and %d calls", len(decls), len(calls))
+	}
+	if elapsed > 30*time.Second {
+		t.Fatalf("lexical analysis of %d functions took %v", functions, elapsed)
+	}
+	t.Logf("%d functions analyzed in %v", functions, elapsed)
 }
