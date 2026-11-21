@@ -361,3 +361,53 @@ type Router interface{ Get(string, http.HandlerFunc) }
 	}
 	expectEdges(t, got, want)
 }
+
+// Each fixture made the type pass emit an edge that real Go semantics
+// contradict, because a method set depended on code the pass cannot see.
+func TestRegressionGoTypesNeverResolveThroughUnseenCode(t *testing.T) {
+	module := "module example.test/m\n\ngo 1.26\n"
+	for _, tc := range []struct {
+		name    string
+		fixture map[string]string
+		edges   map[string]map[string]goEdge
+		none    []string
+	}{
+		{"embedded named type with an unknown underlying type", map[string]string{"go.mod": module,
+			"p/p.go": "package p\n\nimport \"ext.example/dep\"\n\ntype Wrapper dep.Base\n\ntype S struct {\n\tWrapper\n\tinner\n}\n\ntype inner struct{ mid }\n\ntype mid struct{ deep }\n\ntype deep struct{}\n\nfunc (deep) Run() {}\n\nfunc Use(s S) {\n\ts.Run()\n}\n",
+		}, map[string]map[string]goEdge{"call": {"Use->Run@21": {"unresolved", ""}}}, nil},
+		{"embedded interface whose method set includes an unknown interface", map[string]string{"go.mod": module,
+			"p/p.go": "package p\n\nimport \"ext.example/dep\"\n\ntype J interface {\n\tdep.Closer\n\tOther()\n}\n\ntype S struct {\n\tJ\n\tinner\n}\n\ntype inner struct{ deep }\n\ntype deep struct{}\n\nfunc (deep) Close() {}\n\nfunc Use(s S) {\n\ts.Close()\n}\n",
+		}, map[string]map[string]goEdge{"call": {"Use->Close@22": {"unresolved", ""}}}, nil},
+		{"interface embedding a module interface that embeds an unknown one", map[string]string{"go.mod": module,
+			"p/p.go": "package p\n\nimport \"ext.example/dep\"\n\ntype Inner interface {\n\tdep.Closer\n\tRun()\n}\n\ntype Outer interface {\n\tInner\n\tStop()\n}\n\ntype Impl struct{}\n\nfunc (Impl) Run()  {}\nfunc (Impl) Stop() {}\n\nfunc Use(o Outer) {\n\to.Stop()\n}\n",
+		}, nil, []string{"implements", "dispatch"}},
+		{"package with a file excluded from analysis", map[string]string{
+			".traceignore":  "*_gen.go\n",
+			"p/model.go":    "package p\n\ntype Base struct{}\n\nfunc (Base) Validate() error { return nil }\n\ntype User struct{ Base }\n\nfunc Check(u *User) error {\n\treturn u.Validate()\n}\n",
+			"p/user_gen.go": "package p\n\nfunc (u *User) Validate() error { return nil }\n",
+		}, map[string]map[string]goEdge{"call": {"Check->Validate@10": {"unresolved", ""}}}, nil},
+		{"test-file implementations are not dispatch targets of non-test callers", map[string]string{"go.mod": module,
+			"p/p.go":      "package p\n\ntype Store interface{ Get() string }\n\nfunc Use(s Store) string { return s.Get() }\n",
+			"p/p_test.go": "package p\n\ntype fake struct{}\n\nfunc (fake) Get() string { return \"\" }\n",
+		}, nil, []string{"dispatch"}},
+		{"dispatch follows the static named interface only", map[string]string{"go.mod": module,
+			"p/p.go": "package p\n\ntype Store interface{ Get() string }\n\ntype C interface {\n\tStore\n\tPut()\n}\n\ntype A struct{}\n\nfunc (A) Get() string { return \"a\" }\n\ntype B struct{}\n\nfunc (B) Get() string { return \"b\" }\nfunc (B) Put()        {}\n\nfunc Use(x interface {\n\tStore\n\tPut()\n}) string {\n\treturn x.Get()\n}\n\nfunc G[T C](v T) string { return v.Get() }\n\nfunc H(c C) string { return c.Get() }\n",
+		}, map[string]map[string]goEdge{"dispatch": {"H->Get@28": {"typed", "p/p.go:Get:16"}}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, root := goTypeFixture(t, tc.fixture)
+			for kind, want := range tc.edges {
+				got := goEdges(t, db, root, kind)
+				if kind == "dispatch" && len(got) != len(want) {
+					t.Errorf("dispatch edges %v, want %v", got, want)
+				}
+				expectEdges(t, got, want)
+			}
+			for _, kind := range tc.none {
+				if got := goEdges(t, db, root, kind); len(got) != 0 {
+					t.Errorf("%s edges through unseen code: %v", kind, got)
+				}
+			}
+		})
+	}
+}

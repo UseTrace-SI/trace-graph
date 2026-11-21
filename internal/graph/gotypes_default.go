@@ -46,10 +46,11 @@ type goTypeFile struct {
 }
 
 type goTypePackage struct {
-	path  string
-	files []*goTypeFile
-	pkg   *types.Package
-	state int // 0 pending, 1 checking, 2 checked
+	path       string
+	files      []*goTypeFile
+	pkg        *types.Package
+	state      int  // 0 pending, 1 checking, 2 checked
+	incomplete bool // its directory holds Go files the pass did not check
 }
 
 // goDecl is an indexed declaration reachable from a types.Object position.
@@ -77,21 +78,24 @@ type goOutcome struct {
 type goDynamicCall struct {
 	relation, fromID, fromName, file string
 	line                             int
+	test                             bool
 	method                           *types.Func
 	iface                            *types.Named
 }
 
 type goTypePass struct {
-	ctx       context.Context
-	stop      time.Time
-	fset      *token.FileSet
-	byPath    map[string]*goTypePackage
-	packages  []*goTypePackage
-	decls     map[token.Pos]*goDecl
-	outcomes  map[string]goOutcome
-	conflicts map[string]bool
-	dynamic   []goDynamicCall
-	stats     goTypeStats
+	ctx        context.Context
+	root       string
+	incomplete map[*types.Package]bool
+	stop       time.Time
+	fset       *token.FileSet
+	byPath     map[string]*goTypePackage
+	packages   []*goTypePackage
+	decls      map[token.Pos]*goDecl
+	outcomes   map[string]goOutcome
+	conflicts  map[string]bool
+	dynamic    []goDynamicCall
+	stats      goTypeStats
 }
 
 // resolveGoTypes type-checks the analyzed module's Go packages from source
@@ -110,14 +114,16 @@ func resolveGoTypes(ctx context.Context, tx *sql.Tx, repo, module string, source
 		stop = deadline.Add(-goTypeReserve)
 	}
 	pass := &goTypePass{
-		ctx:       ctx,
-		stop:      stop,
-		fset:      token.NewFileSet(),
-		byPath:    map[string]*goTypePackage{},
-		decls:     map[token.Pos]*goDecl{},
-		outcomes:  map[string]goOutcome{},
-		conflicts: map[string]bool{},
-		stats:     goTypeStats{Status: "complete"},
+		ctx:        ctx,
+		root:       repo,
+		incomplete: map[*types.Package]bool{},
+		stop:       stop,
+		fset:       token.NewFileSet(),
+		byPath:     map[string]*goTypePackage{},
+		decls:      map[token.Pos]*goDecl{},
+		outcomes:   map[string]goOutcome{},
+		conflicts:  map[string]bool{},
+		stats:      goTypeStats{Status: "complete"},
 	}
 	pass.load(module, sources)
 	for _, pkg := range pass.packages {
@@ -187,18 +193,31 @@ func (p *goTypePass) load(module string, sources []goSource) {
 		names map[string]bool
 	}
 	dirs := map[string]*dirFiles{}
+	delivered, broken := map[string]map[string]bool{}, map[string]bool{}
 	for _, source := range sources {
 		dir, base := pathpkg.Dir(source.rel), pathpkg.Base(source.rel)
+		if delivered[dir] == nil {
+			delivered[dir] = map[string]bool{}
+		}
+		delivered[dir][base] = true
 		if ignoredGoDirectory(dir) {
 			p.stats.SkippedFiles++
 			continue
 		}
 		if match, err := ctxt.MatchFile(dir, base); err != nil || !match {
+			if err != nil {
+				broken[dir] = true
+			}
 			p.stats.SkippedFiles++
 			continue
 		}
 		file, err := parser.ParseFile(p.fset, source.rel, source.src, parser.SkipObjectResolution)
-		if err != nil || importsC(file) {
+		if err != nil {
+			broken[dir] = true // the real build has declarations the pass lacks
+			p.stats.SkippedFiles++
+			continue
+		}
+		if importsC(file) {
 			p.stats.SkippedFiles++
 			continue
 		}
@@ -244,8 +263,12 @@ func (p *goTypePass) load(module string, sources []goSource) {
 				path = module + "/" + dir
 			}
 		}
-		main := &goTypePackage{path: path}
-		external := &goTypePackage{path: path + "_test"}
+		incomplete := broken[dir] || p.unseenGoFiles(dir, delivered[dir])
+		if incomplete {
+			p.stats.IncompletePackages++
+		}
+		main := &goTypePackage{path: path, incomplete: incomplete}
+		external := &goTypePackage{path: path + "_test", incomplete: incomplete}
 		for _, file := range entry.files {
 			switch {
 			case file.file.Name.Name == primary:
@@ -269,6 +292,37 @@ func (p *goTypePass) load(module string, sources []goSource) {
 			p.byPath[path] = main
 		}
 	}
+}
+
+// unseenGoFiles reports Go files in a package directory that never reached
+// the pass: excluded by policy or .gitignore, symlinked or unreadable. Only
+// directory entry names are read. Such a file can declare a method that
+// shadows a promoted one, so the package's view is incomplete.
+func (p *goTypePass) unseenGoFiles(dir string, seen map[string]bool) bool {
+	anchor, err := os.OpenRoot(p.root)
+	if err != nil {
+		return true
+	}
+	defer anchor.Close()
+	handle, err := anchor.Open(dir)
+	if err != nil {
+		return true
+	}
+	defer handle.Close()
+	entries, err := handle.ReadDir(-1)
+	if err != nil {
+		return true
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") {
+			continue
+		}
+		if !seen[name] {
+			return true
+		}
+	}
+	return false
 }
 
 // index maps declaration name positions to persistent symbol IDs. Functions
@@ -374,6 +428,9 @@ func (p *goTypePass) check(pkg *goTypePackage) (err error) {
 	info := &types.Info{Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
 	conf := types.Config{Importer: p, DisableUnusedImportCheck: true, Error: func(error) { p.stats.TypeErrors++ }}
 	pkg.pkg, _ = conf.Check(pkg.path, p.fset, files, info)
+	if pkg.incomplete && pkg.pkg != nil {
+		p.incomplete[pkg.pkg] = true
+	}
 	p.stats.Packages++
 	p.stats.Files += len(files)
 	p.classifyCalls(pkg, info)
@@ -404,7 +461,7 @@ func (p *goTypePass) classifyCalls(pkg *goTypePackage, info *types.Info) {
 					p.record(goRouteRelationID(fromID, at.Line, at.Column), handlerOutcome)
 				}
 				if dynamic != nil {
-					dynamic.relation, dynamic.fromID, dynamic.fromName, dynamic.file, dynamic.line = relation, fromID, fn.Name.Name, file.rel, at.Line
+					dynamic.relation, dynamic.fromID, dynamic.fromName, dynamic.file, dynamic.line, dynamic.test = relation, fromID, fn.Name.Name, file.rel, at.Line, file.test
 					p.dynamic = append(p.dynamic, *dynamic)
 				}
 			}
@@ -472,9 +529,9 @@ func (p *goTypePass) selection(caller *goTypeFile, selection *types.Selection) (
 			return goOutcome{}, nil
 		}
 		if types.IsInterface(signature.Recv().Type()) {
-			return goOutcome{kind: goDynamic}, &goDynamicCall{method: fn, iface: dispatchInterface(selection, signature)}
+			return goOutcome{kind: goDynamic}, &goDynamicCall{method: fn, iface: dispatchInterface(selection)}
 		}
-		if len(selection.Index()) > 1 && !certainPromotion(selection.Recv(), len(selection.Index())-1) {
+		if len(selection.Index()) > 1 && !p.certainPromotion(selection.Recv(), len(selection.Index())-1) {
 			return goOutcome{}, nil
 		}
 		return p.target(caller, fn), nil
@@ -482,19 +539,36 @@ func (p *goTypePass) selection(caller *goTypeFile, selection *types.Selection) (
 	return goOutcome{}, nil
 }
 
-// dispatchInterface names the interface a dynamic call goes through: the
-// static receiver type when it is a named interface, otherwise the interface
-// that declares the method (for example one embedded in a struct).
-func dispatchInterface(selection *types.Selection, signature *types.Signature) *types.Named {
-	for _, typ := range []types.Type{selection.Recv(), signature.Recv().Type()} {
-		if pointer, ok := types.Unalias(typ).(*types.Pointer); ok {
-			typ = pointer.Elem()
-		}
-		if named, ok := types.Unalias(typ).(*types.Named); ok && types.IsInterface(named) {
+// dispatchInterface names the interface whose implementations a dynamic call
+// can reach: the static receiver type when it is a named interface, or the
+// named interface field embedded on the selection's path. An unnamed static
+// interface or a type parameter can be narrower than the interface that
+// declares the method, so those calls get no dispatch edges.
+func dispatchInterface(selection *types.Selection) *types.Named {
+	typ := derefType(selection.Recv())
+	index := selection.Index()
+	for step := 0; ; step++ {
+		if types.IsInterface(typ) {
+			if _, param := typ.(*types.TypeParam); param {
+				return nil
+			}
+			named, _ := types.Unalias(typ).(*types.Named)
 			return named
 		}
+		structure, ok := typ.Underlying().(*types.Struct)
+		if !ok || step >= len(index)-1 || index[step] >= structure.NumFields() {
+			return nil
+		}
+		typ = derefType(structure.Field(index[step]).Type())
 	}
-	return nil
+}
+
+func derefType(typ types.Type) types.Type {
+	typ = types.Unalias(typ)
+	if pointer, ok := typ.(*types.Pointer); ok {
+		return types.Unalias(pointer.Elem())
+	}
+	return typ
 }
 
 func (p *goTypePass) target(caller *goTypeFile, fn *types.Func) goOutcome {
@@ -520,34 +594,48 @@ func isInvalidType(typ types.Type) bool {
 	return ok && basic.Kind() == types.Invalid
 }
 
+// knownType reports a type whose methods and embedded fields are all known
+// to the pass: not of unknown type or underlying type, not an interface whose
+// method set involves an unknown embedded interface, and not declared in a
+// package whose directory holds files the pass did not see (one of them could
+// declare a method on it).
+func (p *goTypePass) knownType(typ types.Type) bool {
+	typ = derefType(typ)
+	if isInvalidType(typ) || isInvalidType(typ.Underlying()) {
+		return false
+	}
+	if named, ok := typ.(*types.Named); ok && p.incomplete[named.Obj().Pkg()] {
+		return false
+	}
+	if iface, ok := typ.Underlying().(*types.Interface); ok {
+		return completeInterface(iface, 0)
+	}
+	return true
+}
+
 // certainPromotion reports whether a method promoted through depth embedded
-// fields cannot be shadowed by an embedded field of unknown type: a shallower
-// field from a package that was not loaded could declare the same name.
-func certainPromotion(recv types.Type, depth int) bool {
+// fields cannot be shadowed by a method or field the pass does not know: the
+// receiver and every type embedded at a shallower depth must be known.
+func (p *goTypePass) certainPromotion(recv types.Type, depth int) bool {
 	level := []types.Type{recv}
 	visited := 0
-	for d := 1; d < depth; d++ {
+	for d := 0; d < depth; d++ {
 		var next []types.Type
 		for _, typ := range level {
-			if pointer, ok := types.Unalias(typ).(*types.Pointer); ok {
-				typ = pointer.Elem()
+			if !p.knownType(typ) {
+				return false
 			}
-			structure, ok := typ.Underlying().(*types.Struct)
+			structure, ok := derefType(typ).Underlying().(*types.Struct)
 			if !ok {
 				continue
 			}
 			for i := 0; i < structure.NumFields(); i++ {
-				field := structure.Field(i)
-				if !field.Embedded() {
-					continue
+				if field := structure.Field(i); field.Embedded() {
+					if visited++; visited > goEmbeddingLimit {
+						return false
+					}
+					next = append(next, field.Type())
 				}
-				if isInvalidType(field.Type()) {
-					return false
-				}
-				if visited++; visited > goEmbeddingLimit {
-					return false
-				}
-				next = append(next, field.Type())
 			}
 		}
 		level = next
@@ -555,43 +643,57 @@ func certainPromotion(recv types.Type, depth int) bool {
 	return true
 }
 
-// unknownEmbedding reports whether any embedded field reachable from typ has
-// an unknown type, which leaves typ's method set uncertain.
-func unknownEmbedding(typ types.Type) bool {
+// fullyKnown reports a type whose whole method set is known: it and every
+// type it embeds, at any depth.
+func (p *goTypePass) fullyKnown(typ types.Type) bool {
 	level := []types.Type{typ}
 	seen := map[types.Type]bool{}
 	visited := 0
 	for len(level) > 0 {
 		var next []types.Type
 		for _, current := range level {
-			if pointer, ok := types.Unalias(current).(*types.Pointer); ok {
-				current = pointer.Elem()
-			}
+			current = derefType(current)
 			if seen[current] {
 				continue
 			}
 			seen[current] = true
+			if !p.knownType(current) {
+				return false
+			}
 			structure, ok := current.Underlying().(*types.Struct)
 			if !ok {
 				continue
 			}
 			for i := 0; i < structure.NumFields(); i++ {
-				field := structure.Field(i)
-				if !field.Embedded() {
-					continue
+				if field := structure.Field(i); field.Embedded() {
+					if visited++; visited > goEmbeddingLimit {
+						return false
+					}
+					next = append(next, field.Type())
 				}
-				if isInvalidType(field.Type()) {
-					return true
-				}
-				if visited++; visited > goEmbeddingLimit {
-					return true
-				}
-				next = append(next, field.Type())
 			}
 		}
 		level = next
 	}
-	return false
+	return true
+}
+
+// completeInterface reports an interface none of whose embedded interfaces,
+// at any depth, is of unknown type.
+func completeInterface(iface *types.Interface, depth int) bool {
+	if depth > 16 {
+		return false
+	}
+	for i := 0; i < iface.NumEmbeddeds(); i++ {
+		embedded := iface.EmbeddedType(i)
+		if isInvalidType(embedded) || isInvalidType(embedded.Underlying()) {
+			return false
+		}
+		if inner, ok := embedded.Underlying().(*types.Interface); ok && !completeInterface(inner, depth+1) {
+			return false
+		}
+	}
+	return true
 }
 
 // containsInvalid reports unknown types anywhere in a method signature.
@@ -655,13 +757,8 @@ func containsInvalid(typ types.Type, depth int) bool {
 // would silently drop its methods from the set and make Implements succeed
 // for types that lack them.
 func certainInterface(iface *types.Interface) bool {
-	if !iface.IsMethodSet() || iface.NumMethods() == 0 {
+	if !iface.IsMethodSet() || iface.NumMethods() == 0 || !completeInterface(iface, 0) {
 		return false
-	}
-	for i := 0; i < iface.NumEmbeddeds(); i++ {
-		if isInvalidType(iface.EmbeddedType(i)) {
-			return false
-		}
 	}
 	for i := 0; i < iface.NumMethods(); i++ {
 		if containsInvalid(iface.Method(i).Type(), 0) {
@@ -700,7 +797,7 @@ func (p *goTypePass) implementations() ([]goImplementation, map[*types.Named][]*
 				if certainInterface(iface) {
 					ifaces = append(ifaces, named)
 				}
-			} else if !isInvalidType(named.Underlying()) && !unknownEmbedding(named) {
+			} else if p.fullyKnown(named) {
 				concrete = append(concrete, named)
 			}
 		}
@@ -873,7 +970,8 @@ func (p *goTypePass) apply(tx *sql.Tx, repo string) error {
 				continue
 			}
 			decl := p.decls[fn.Pos()]
-			if decl == nil || decl.duplicate {
+			// A non-test build never contains test-file implementations.
+			if decl == nil || decl.duplicate || (decl.test && !call.test) {
 				continue
 			}
 			ok, err := insert(scopedID(repo, call.relation+"=>"+decl.id), call.fromName, call.method.Name(), "dispatch", call.file, call.line, scopedID(repo, call.fromID), scopedID(repo, decl.id), "dispatch:"+call.iface.Obj().Name())
