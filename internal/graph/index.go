@@ -327,12 +327,16 @@ func resolveRepository(ctx context.Context, tx *sql.Tx, root string, changed boo
 			return err
 		}
 	}
-	// Type-derived edges depend on other files, so they are always rebuilt.
-	if _, err := tx.ExecContext(ctx, "DELETE FROM relations WHERE repo=? AND kind IN ('implements','dispatch')", root); err != nil {
+	// Edges derived by the Go type pass depend on other files, so they are
+	// always rebuilt. Lexical implements edges belong to their file.
+	if _, err := tx.ExecContext(ctx, "DELETE FROM relations WHERE repo=? AND kind IN ('implements','dispatch') AND id IN (SELECT relation_id FROM relation_targets WHERE hint='implements' OR substr(hint,1,9)='dispatch:')", root); err != nil {
 		return err
 	}
 	if err := resolveCalls(ctx, tx, root); err != nil {
 		return err
+	}
+	if err := resolveLexical(ctx, tx, root); err != nil {
+		return fmt.Errorf("resolving imports and lexical calls: %w", err)
 	}
 	stats, err := resolveGoTypes(ctx, tx, root, moduleName(root), goSources, goOverBudget)
 	if err != nil {

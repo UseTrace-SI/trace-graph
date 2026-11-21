@@ -158,6 +158,12 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 		}
 	}
 	walk(root)
+	// Imports and HTTP routes come from the shared pure-Go extractor. Without
+	// lexical containers, Tree-sitter symbols are never module-level targets,
+	// so these resolve to module files (and decorated Python handlers) only.
+	if lang := relationLanguage(rel); lang != "" {
+		writeLexRelations(lang, repo, rel, newLexSource(lang, string(src)), db, func(int) (string, string) { return "", "" })
+	}
 	return n, nil
 }
 

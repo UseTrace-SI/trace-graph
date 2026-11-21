@@ -36,7 +36,7 @@ func TestLexicalKindIgnoresCommentEmbeddedKeywords(t *testing.T) {
 	if _, err := AnalyzeRepo(root, db); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]string{"Foo": "symbol", "Bar": "symbol", "Real": "type", "RealFn": "func"} {
+	for name, want := range map[string]string{"Foo": "func", "Bar": "func", "Real": "type", "RealFn": "func"} {
 		var got string
 		if err := db.QueryRow("SELECT kind FROM symbols WHERE repo=? AND name=?", root, name).Scan(&got); err != nil || got != want {
 			t.Fatalf("%s: kind %q want %q (%v)", name, got, want, err)

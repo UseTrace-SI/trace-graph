@@ -79,7 +79,10 @@ const analyzerVersion = "inventory-v8"
 func supportedFile(ext string) bool { _, ok := langExts[ext]; return ok }
 
 func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, error) {
-	if langExts[strings.ToLower(filepathExt(rel))] != "go" {
+	if lang := langExts[strings.ToLower(filepathExt(rel))]; lang != "go" {
+		if lexDeclarationLanguage(lang) {
+			return analyzeLexicalFile(lang, repo, rel, string(src), db)
+		}
 		return analyzeRegexFile(repo, rel, string(src), db)
 	}
 	db.namespace = pathpkg.Dir(rel)
