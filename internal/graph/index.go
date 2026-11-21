@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,36 +183,19 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	seen := map[string]bool{}
 	n := 0
 	var totalBytes int64
-	err = walkSourcesContext(ctx, root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = walkSourcesContext(ctx, root, func(rel string, f *os.File) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if !entry.Type().IsRegular() || !supportedFile(strings.ToLower(filepath.Ext(path))) {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
+		path := filepath.Join(root, rel)
 		rel = filepath.ToSlash(rel)
 		seen[rel] = true
 		if len(seen) > 100000 {
 			return fmt.Errorf("repository exceeds 100000 source files")
 		}
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
 		src, err := io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
-		closeErr := f.Close()
 		if err != nil {
 			return err
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 		if len(src) > 8*1024*1024 {
 			return fmt.Errorf("source exceeds 8 MiB: %s", rel)
