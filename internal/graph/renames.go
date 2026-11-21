@@ -147,31 +147,26 @@ func shapeOf(lang, name string, src []byte) symbolShape {
 }
 
 // similarity estimates the Jaccard similarity of two trigram sets from their
-// bottom-k sketches.
+// bottom-k sketches (ascending and distinct) by merging them.
 func similarity(a, b []uint64) float64 {
 	if len(a) == 0 || len(b) == 0 {
 		return 0
 	}
-	in := map[uint64]int{}
-	for _, v := range a {
-		in[v] |= 1
-	}
-	for _, v := range b {
-		in[v] |= 2
-	}
-	union := make([]uint64, 0, len(in))
-	for v := range in {
-		union = append(union, v)
-	}
-	sort.Slice(union, func(i, j int) bool { return union[i] < union[j] })
-	k := min(shapeSketchSize, len(union))
-	shared := 0
-	for _, v := range union[:k] {
-		if in[v] == 3 {
+	union, shared, i, j := 0, 0, 0, 0
+	for union < shapeSketchSize && (i < len(a) || j < len(b)) {
+		switch {
+		case j >= len(b) || (i < len(a) && a[i] < b[j]):
+			i++
+		case i >= len(a) || b[j] < a[i]:
+			j++
+		default:
 			shared++
+			i++
+			j++
 		}
+		union++
 	}
-	return float64(shared) / float64(k)
+	return float64(shared) / float64(union)
 }
 
 // RenameSymbol is a removed or added symbol offered for rename pairing.
@@ -271,14 +266,23 @@ func SymbolRenames(base, head RevisionStats, removed, added []RenameSymbol) (ren
 		renames = append(renames, SymbolRename{FromID: from.symbol.ID, ToID: to.symbol.ID, Evidence: "identical_body", Confidence: confidence, BodySimilarity: 1, SignatureMatch: from.symbol.SignatureShape == to.symbol.SignatureShape, Tokens: from.shape.tokens})
 		paired[0][from.symbol.ID], paired[1][to.symbol.ID] = true, true
 	}
+	// A name and kind present on both sides is the same symbol moved or
+	// edited, never the old or new name of a rename.
+	names := [2]map[string]bool{{}, {}}
+	for _, c := range before {
+		names[0][c.symbol.Kind+"\x00"+c.symbol.Name] = true
+	}
+	for _, c := range after {
+		names[1][c.symbol.Kind+"\x00"+c.symbol.Name] = true
+	}
 	var left, right []candidate
 	for _, c := range before {
-		if !paired[0][c.symbol.ID] && c.shape.tokens >= shapeMinTokens {
+		if !paired[0][c.symbol.ID] && !names[1][c.symbol.Kind+"\x00"+c.symbol.Name] && c.shape.tokens >= shapeMinTokens {
 			left = append(left, c)
 		}
 	}
 	for _, c := range after {
-		if !paired[1][c.symbol.ID] && c.shape.tokens >= shapeMinTokens {
+		if !paired[1][c.symbol.ID] && !names[0][c.symbol.Kind+"\x00"+c.symbol.Name] && c.shape.tokens >= shapeMinTokens {
 			right = append(right, c)
 		}
 	}
@@ -311,17 +315,27 @@ func SymbolRenames(base, head RevisionStats, removed, added []RenameSymbol) (ren
 		}
 		return result
 	}
-	leftBest := make([]best, len(left))
+	// Each score is computed once; best matches of both sides come from the
+	// same matrix, so the pass costs len(left) x len(right) comparisons.
+	scores := make([]float64, len(left)*len(right))
 	for i := range left {
-		leftBest[i] = bestOf(len(right), func(j int) (float64, int) { s, _ := score(left[i], right[j]); return s, j })
+		for j := range right {
+			scores[i*len(right)+j], _ = score(left[i], right[j])
+		}
+	}
+	leftBest, rightBest := make([]best, len(left)), make([]best, len(right))
+	for i := range left {
+		leftBest[i] = bestOf(len(right), func(j int) (float64, int) { return scores[i*len(right)+j], j })
+	}
+	for j := range right {
+		rightBest[j] = bestOf(len(left), func(i int) (float64, int) { return scores[i*len(right)+j], i })
 	}
 	for i, b := range leftBest {
 		if b.index < 0 || b.first < renameMinScore || b.first-b.second < renameMinMargin {
 			continue
 		}
 		j := b.index
-		back := bestOf(len(left), func(k int) (float64, int) { s, _ := score(left[k], right[j]); return s, k })
-		if back.index != i || back.first-back.second < renameMinMargin {
+		if back := rightBest[j]; back.index != i || back.first-back.second < renameMinMargin {
 			continue
 		}
 		confidence, sim := score(left[i], right[j])

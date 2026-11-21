@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegressionExactFileRenamesRemainConservative(t *testing.T) {
@@ -123,5 +124,45 @@ func TestSymbolRenamesPairByNormalizedBody(t *testing.T) {
 				t.Fatalf("renames %q, want %q (%+v)", strings.Join(got, ","), tc.want, renames)
 			}
 		})
+	}
+}
+
+// The reverse best match was recomputed for every removed candidate, so one
+// added symbol against 4000 similar removed ones took 66 s.
+func TestRegressionSymbolRenamesCompareEachPairOnce(t *testing.T) {
+	body := "\tx := a + b\n\ty := x * 2\n\tz := y - 1\n\tw := z + x\n\tv := w * y\n\tu := v - z\n\treturn helper(u, w, v)\n"
+	base := RevisionStats{shapes: map[string]symbolShape{}}
+	head := RevisionStats{shapes: map[string]symbolShape{}}
+	var removed, added []RenameSymbol
+	for i := 0; i < 4000; i++ {
+		id := fmt.Sprintf("a.go:f%d:%d", i, i+1)
+		base.shapes[id] = shapeOf("go", fmt.Sprintf("f%d", i), []byte(fmt.Sprintf("func f%d(a, b int) int {\n%s\t_ = %d\n}", i, body, i)))
+		removed = append(removed, RenameSymbol{ID: id, File: "a.go", Name: fmt.Sprintf("f%d", i), Kind: "func"})
+	}
+	head.shapes["b.go:g:1"] = shapeOf("go", "g", []byte("func g(a, b int) int {\n"+body+"}"))
+	added = append(added, RenameSymbol{ID: "b.go:g:1", File: "b.go", Name: "g", Kind: "func"})
+	start := time.Now()
+	if _, _, checked := SymbolRenames(base, head, removed, added); !checked {
+		t.Fatal("similarity skipped below the comparison bound")
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("4000 x 1 candidates took %v", elapsed)
+	}
+}
+
+// A symbol moved unchanged to another file keeps its name; it used to be
+// left in the similarity pass and paired as a rename with a similar new one.
+func TestRegressionMovedSymbolsAreNotRenames(t *testing.T) {
+	body := "(a, b int) int {\n\tx := a + b\n\ty := x * 2\n\tz := y - 1\n\tw := z + x\n\treturn helper(z, w)\n}"
+	edited := "(a, b int) int {\n\tx := a + b\n\ty := x * 2\n\tz := y - 1\n\tw := z + x\n\treturn helper(z, w+1)\n}"
+	base := RevisionStats{shapes: map[string]symbolShape{"a.go:foo:3": shapeOf("go", "foo", []byte("func foo"+body))}}
+	head := RevisionStats{shapes: map[string]symbolShape{
+		"b.go:foo:3":  shapeOf("go", "foo", []byte("func foo"+body)),
+		"b.go:bar:12": shapeOf("go", "bar", []byte("func bar"+edited)),
+	}}
+	removed := []RenameSymbol{{ID: "a.go:foo:3", File: "a.go", Name: "foo", Kind: "func"}}
+	added := []RenameSymbol{{ID: "b.go:foo:3", File: "b.go", Name: "foo", Kind: "func"}, {ID: "b.go:bar:12", File: "b.go", Name: "bar", Kind: "func"}}
+	if renames, _, _ := SymbolRenames(base, head, removed, added); len(renames) != 0 {
+		t.Fatalf("moved symbol paired as a rename: %+v", renames)
 	}
 }
