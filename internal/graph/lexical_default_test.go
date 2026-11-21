@@ -258,7 +258,7 @@ func TestLexicalBodySearchesAreBounded(t *testing.T) {
 		s := newLexSource(tc.lang, tc.src)
 		decls := lexDeclarations(tc.lang, s)
 		lexCalls(tc.lang, s, decls)
-		if elapsed := time.Since(start); elapsed > 10*time.Second || len(decls) == 0 {
+		if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown || len(decls) == 0 {
 			t.Fatalf("%s: %d declarations in %v", tc.lang, len(decls), elapsed)
 		}
 	}
