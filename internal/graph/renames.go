@@ -207,16 +207,26 @@ func SymbolRenames(base, head RevisionStats, removed, added []RenameSymbol) (ren
 		symbol RenameSymbol
 		shape  symbolShape
 	}
-	collect := func(symbols []RenameSymbol, shapes map[string]symbolShape) []candidate {
+	// A name and kind present on both sides is the same symbol moved or
+	// edited, never the old or new name of a rename (as a path present in
+	// both trees is never a git rename source), so it takes part in neither
+	// pass.
+	names := [2]map[string]bool{{}, {}}
+	for side, symbols := range [2][]RenameSymbol{removed, added} {
+		for _, symbol := range symbols {
+			names[side][symbol.Kind+"\x00"+symbol.Name] = true
+		}
+	}
+	collect := func(symbols []RenameSymbol, shapes map[string]symbolShape, other map[string]bool) []candidate {
 		var out []candidate
 		for _, symbol := range symbols {
-			if shape, ok := shapes[symbol.ID]; ok && shape.tokens > 0 {
+			if shape, ok := shapes[symbol.ID]; ok && shape.tokens > 0 && !other[symbol.Kind+"\x00"+symbol.Name] {
 				out = append(out, candidate{symbol, shape})
 			}
 		}
 		return out
 	}
-	before, after := collect(removed, base.shapes), collect(added, head.shapes)
+	before, after := collect(removed, base.shapes, names[1]), collect(added, head.shapes, names[0])
 	paired := [2]map[string]bool{{}, {}} // removed, added: identities may repeat across sides
 	key := func(c candidate) string { return c.symbol.Kind + "\x00" + string(c.shape.body[:]) }
 	groups := map[string][2][]candidate{}
@@ -256,9 +266,6 @@ func SymbolRenames(base, head RevisionStats, removed, added []RenameSymbol) (ren
 			continue
 		}
 		from, to := g[0][0], g[1][0]
-		if from.symbol.Name == to.symbol.Name {
-			continue
-		}
 		confidence := 1.0
 		if from.shape.tokens < shapeMinTokens {
 			confidence = 0.75
@@ -266,23 +273,14 @@ func SymbolRenames(base, head RevisionStats, removed, added []RenameSymbol) (ren
 		renames = append(renames, SymbolRename{FromID: from.symbol.ID, ToID: to.symbol.ID, Evidence: "identical_body", Confidence: confidence, BodySimilarity: 1, SignatureMatch: from.symbol.SignatureShape == to.symbol.SignatureShape, Tokens: from.shape.tokens})
 		paired[0][from.symbol.ID], paired[1][to.symbol.ID] = true, true
 	}
-	// A name and kind present on both sides is the same symbol moved or
-	// edited, never the old or new name of a rename.
-	names := [2]map[string]bool{{}, {}}
-	for _, c := range before {
-		names[0][c.symbol.Kind+"\x00"+c.symbol.Name] = true
-	}
-	for _, c := range after {
-		names[1][c.symbol.Kind+"\x00"+c.symbol.Name] = true
-	}
 	var left, right []candidate
 	for _, c := range before {
-		if !paired[0][c.symbol.ID] && !names[1][c.symbol.Kind+"\x00"+c.symbol.Name] && c.shape.tokens >= shapeMinTokens {
+		if !paired[0][c.symbol.ID] && c.shape.tokens >= shapeMinTokens {
 			left = append(left, c)
 		}
 	}
 	for _, c := range after {
-		if !paired[1][c.symbol.ID] && !names[0][c.symbol.Kind+"\x00"+c.symbol.Name] && c.shape.tokens >= shapeMinTokens {
+		if !paired[1][c.symbol.ID] && c.shape.tokens >= shapeMinTokens {
 			right = append(right, c)
 		}
 	}

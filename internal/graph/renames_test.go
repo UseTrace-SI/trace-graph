@@ -151,18 +151,23 @@ func TestRegressionSymbolRenamesCompareEachPairOnce(t *testing.T) {
 }
 
 // A symbol moved unchanged to another file keeps its name; it used to be
-// left in the similarity pass and paired as a rename with a similar new one.
+// left in the similarity pass and paired as a rename with a similar new one,
+// or listed as a rename ambiguity with a new identical copy.
 func TestRegressionMovedSymbolsAreNotRenames(t *testing.T) {
 	body := "(a, b int) int {\n\tx := a + b\n\ty := x * 2\n\tz := y - 1\n\tw := z + x\n\treturn helper(z, w)\n}"
 	edited := "(a, b int) int {\n\tx := a + b\n\ty := x * 2\n\tz := y - 1\n\tw := z + x\n\treturn helper(z, w+1)\n}"
-	base := RevisionStats{shapes: map[string]symbolShape{"a.go:foo:3": shapeOf("go", "foo", []byte("func foo"+body))}}
-	head := RevisionStats{shapes: map[string]symbolShape{
-		"b.go:foo:3":  shapeOf("go", "foo", []byte("func foo"+body)),
-		"b.go:bar:12": shapeOf("go", "bar", []byte("func bar"+edited)),
-	}}
-	removed := []RenameSymbol{{ID: "a.go:foo:3", File: "a.go", Name: "foo", Kind: "func"}}
-	added := []RenameSymbol{{ID: "b.go:foo:3", File: "b.go", Name: "foo", Kind: "func"}, {ID: "b.go:bar:12", File: "b.go", Name: "bar", Kind: "func"}}
-	if renames, _, _ := SymbolRenames(base, head, removed, added); len(renames) != 0 {
-		t.Fatalf("moved symbol paired as a rename: %+v", renames)
+	for _, tc := range []struct{ name, bar string }{{"similar new symbol", edited}, {"identical new copy", body}} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := RevisionStats{shapes: map[string]symbolShape{"a.go:foo:3": shapeOf("go", "foo", []byte("func foo"+body))}}
+			head := RevisionStats{shapes: map[string]symbolShape{
+				"b.go:foo:3":  shapeOf("go", "foo", []byte("func foo"+body)),
+				"b.go:bar:12": shapeOf("go", "bar", []byte("func bar"+tc.bar)),
+			}}
+			removed := []RenameSymbol{{ID: "a.go:foo:3", File: "a.go", Name: "foo", Kind: "func"}}
+			added := []RenameSymbol{{ID: "b.go:foo:3", File: "b.go", Name: "foo", Kind: "func"}, {ID: "b.go:bar:12", File: "b.go", Name: "bar", Kind: "func"}}
+			if renames, ambiguous, _ := SymbolRenames(base, head, removed, added); len(renames) != 0 || len(ambiguous) != 0 {
+				t.Fatalf("moved symbol paired: renames %+v, ambiguities %+v", renames, ambiguous)
+			}
+		})
 	}
 }
