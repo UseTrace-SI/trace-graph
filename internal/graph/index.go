@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -79,6 +80,10 @@ type FileWarning struct {
 type Report struct {
 	// Symbols counts the symbols written by this generation.
 	Symbols int
+	// Files counts the sources of the checkout; Read counts those read and
+	// hashed because their stat key did not prove them unchanged, and
+	// Analyzed those whose content changed.
+	Files, Read, Analyzed int
 	// Skipped lists every source currently left out of the index.
 	Skipped []FileWarning
 }
@@ -92,11 +97,10 @@ const maxReportedWarnings = 100
 // skipped with a recorded warning rather than failing the whole index; it is
 // analyzed again once its content changes.
 func AnalyzeRepoReport(ctx context.Context, repo string, db *sql.DB) (Report, error) {
-	n, err := analyzeRepo(ctx, repo, db)
+	report, err := analyzeRepo(ctx, repo, db)
 	if err != nil {
 		return Report{}, err
 	}
-	report := Report{Symbols: n, Skipped: []FileWarning{}}
 	root, err := canonicalRoot(repo)
 	if err != nil {
 		return Report{}, err
@@ -141,45 +145,52 @@ func canonicalRoot(repo string) (string, error) {
 	return root, nil
 }
 
-func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (int, error) {
+// indexClock is the time stat keys are judged against; tests move it.
+var indexClock = time.Now
+
+func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	root, err := canonicalRoot(repo)
 	if err != nil {
-		return 0, err
+		return Report{}, err
 	}
 	info, err := os.Stat(root)
 	if err != nil {
-		return 0, err
+		return Report{}, err
 	}
 	if !info.IsDir() {
-		return 0, fmt.Errorf("repository is not a directory: %s", root)
+		return Report{}, fmt.Errorf("repository is not a directory: %s", root)
 	}
+	start := indexClock()
 	modDigest, err := goModDigest(root)
 	if err != nil {
-		return 0, fmt.Errorf("reading go.mod: %w", err)
+		return Report{}, fmt.Errorf("reading go.mod: %w", err)
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		if isIndexBusy(err) {
-			return 0, indexBusyError(err)
+			return Report{}, indexBusyError(err)
 		}
-		return 0, err
+		return Report{}, err
 	}
 	defer tx.Rollback()
 	w := &indexWriter{tx: tx}
 	defer w.close()
+	cache, err := loadFileCache(ctx, tx, root)
+	if err != nil {
+		return Report{}, err
+	}
+	// Type-checked resolution follows the platform's build constraints.
+	digestPrefix := fmt.Sprintf("%s@%s/%s:%s:", analyzerVersion, runtime.GOOS, runtime.GOARCH, modDigest)
 	seen := map[string]bool{}
-	n, analyzed := 0, 0
+	n, read, analyzed := 0, 0, 0
 	var totalBytes int64
 	// Every Go file, cached or not, takes part in package-wide type checking,
-	// except skipped files, whose declarations are not in the index.
+	// except skipped files, whose declarations are not in the index. Sources
+	// skipped by their stat key are read only if the pass runs.
 	var goSources []goSource
 	goBytes, goOverBudget := 0, false
-	skipped, err := warnedFiles(ctx, tx, root)
-	if err != nil {
-		return 0, err
-	}
 	err = walkSourcesContext(ctx, root, func(rel string, f *os.File) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -190,20 +201,33 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (int, error) {
 		if len(seen) > 100000 {
 			return fmt.Errorf("repository exceeds 100000 source files")
 		}
-		src, err := io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
+		info, err := f.Stat()
 		if err != nil {
 			return err
 		}
-		if len(src) > 8*1024*1024 {
+		key := statKey(info, start)
+		cached, known := cache[rel]
+		unchanged := known && key != "" && cached.stat == key && strings.HasPrefix(cached.digest, digestPrefix)
+		var src []byte
+		size := info.Size()
+		if !unchanged {
+			src, err = io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
+			if err != nil {
+				return err
+			}
+			size = int64(len(src))
+			read++
+		}
+		if size > 8*1024*1024 {
 			return fmt.Errorf("source exceeds 8 MiB: %s", rel)
 		}
-		totalBytes += int64(len(src))
+		totalBytes += size
 		if totalBytes > 512*1024*1024 {
 			return fmt.Errorf("repository sources exceed 512 MiB")
 		}
 		typeChecked := goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go")
 		if typeChecked {
-			if goBytes += len(src); goBytes > goTypeSourceBudget {
+			if goBytes += int(size); goBytes > goTypeSourceBudget {
 				goOverBudget, goSources = true, nil
 			}
 		}
@@ -212,18 +236,23 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (int, error) {
 				goSources = append(goSources, goSource{rel: rel, src: src})
 			}
 		}
-		// Type-checked resolution follows the platform's build constraints.
-		digest := fmt.Sprintf("%s@%s/%s:%s:%x", analyzerVersion, runtime.GOOS, runtime.GOARCH, modDigest, sha256.Sum256(src))
-		var old string
-		err = tx.QueryRowContext(ctx, "SELECT digest FROM file_cache_v2 WHERE repo=? AND path=?", root, rel).Scan(&old)
-		if err != nil && err != sql.ErrNoRows {
-			return err
-		}
-		if old == digest {
-			if !skipped[rel] {
-				addGoSource()
+		if unchanged {
+			if !cached.skipped {
+				addGoSource() // read later, only if the type pass runs
 			}
 			return nil
+		}
+		digest := fmt.Sprintf("%s%x", digestPrefix, sha256.Sum256(src))
+		if known && cached.digest == digest {
+			// Touched but identical: remember the new stat key.
+			if !cached.skipped {
+				addGoSource()
+			}
+			if cached.stat == key {
+				return nil
+			}
+			_, err := tx.Exec("UPDATE file_cache_v2 SET stat=? WHERE repo=? AND path=?", nullable(key), root, rel)
+			return err
 		}
 		if err := removeFile(tx, root, rel); err != nil {
 			return err
@@ -246,46 +275,42 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (int, error) {
 			n += count
 			addGoSource()
 		}
-		if _, err := tx.Exec("INSERT INTO file_cache_v2(repo,path,digest) VALUES(?,?,?)", root, rel, digest); err != nil {
+		if _, err := tx.Exec("INSERT INTO file_cache_v2(repo,path,digest,stat) VALUES(?,?,?,?)", root, rel, digest, nullable(key)); err != nil {
 			return err
 		}
 		analyzed++
 		return nil
 	})
 	if err != nil {
-		return 0, fmt.Errorf("indexing repository: %w", err)
-	}
-	rows, err := tx.QueryContext(ctx, "SELECT path FROM file_cache_v2 WHERE repo=?", root)
-	if err != nil {
-		return 0, err
+		return Report{}, fmt.Errorf("indexing repository: %w", err)
 	}
 	var deleted []string
-	for rows.Next() {
-		var path string
-		if err := rows.Scan(&path); err != nil {
-			rows.Close()
-			return 0, err
-		}
+	for path := range cache {
 		if !seen[path] {
 			deleted = append(deleted, path)
 		}
 	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return 0, err
-	}
+	sort.Strings(deleted)
 	for _, path := range deleted {
 		if err := removeFile(tx, root, path); err != nil {
-			return 0, err
+			return Report{}, err
 		}
 	}
-	if err := resolveRepository(ctx, tx, root, analyzed > 0 || len(deleted) > 0, goSources, goOverBudget); err != nil {
-		return 0, err
+	resolve, err := resolutionNeeded(ctx, tx, root, analyzed > 0 || len(deleted) > 0)
+	if err != nil {
+		return Report{}, err
+	}
+	if resolve {
+		if goSources, err = readUnchangedGoSources(root, goSources); err != nil {
+			return Report{}, fmt.Errorf("reading Go sources: %w", err)
+		}
+		if err := resolveRepository(ctx, tx, root, goSources, goOverBudget); err != nil {
+			return Report{}, err
+		}
 	}
 	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.file,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
 	if err != nil {
-		return 0, err
+		return Report{}, err
 	}
 	type sym struct{ id, text string }
 	var syms []sym
@@ -293,56 +318,59 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (int, error) {
 		var id, file, name, sig string
 		if err := symRows.Scan(&id, &file, &name, &sig); err != nil {
 			symRows.Close()
-			return 0, err
+			return Report{}, err
 		}
 		syms = append(syms, sym{id: id, text: embed.SymbolText(file, name, sig)})
 	}
 	symRows.Close()
 	if err := symRows.Err(); err != nil {
-		return 0, err
+		return Report{}, err
 	}
 	if len(syms) > 0 {
 		insert, err := tx.PrepareContext(ctx, "INSERT OR REPLACE INTO symbol_embeddings(symbol_id,dim,vector) VALUES(?,?,?)")
 		if err != nil {
-			return 0, err
+			return Report{}, err
 		}
 		for _, s := range syms {
 			if _, err := insert.Exec(s.id, embed.Dim, embed.Encode(embed.Embed(s.text))); err != nil {
 				insert.Close()
-				return 0, err
+				return Report{}, err
 			}
 		}
 		insert.Close()
 	}
 	if _, err := tx.Exec("INSERT INTO repo_state(repo,indexed_at) VALUES(?,?) ON CONFLICT(repo) DO UPDATE SET indexed_at=excluded.indexed_at", root, time.Now().UnixMilli()); err != nil {
-		return 0, err
+		return Report{}, err
 	}
 	if err := ctx.Err(); err != nil {
-		return 0, err
+		return Report{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		if isIndexBusy(err) {
-			return 0, indexBusyError(err)
+			return Report{}, indexBusyError(err)
 		}
-		return 0, err
+		return Report{}, err
 	}
-	return n, nil
+	return Report{Symbols: n, Files: len(seen), Read: read, Analyzed: analyzed}, nil
 }
 
-// resolveRepository recomputes every relation target of a generation. With
-// no changed or deleted file, a complete previous pass is still exact, so an
-// unchanged refresh skips the work.
-func resolveRepository(ctx context.Context, tx *sql.Tx, root string, changed bool, goSources []goSource, goOverBudget bool) error {
-	if !changed {
-		var complete int
-		err := tx.QueryRowContext(ctx, "SELECT complete FROM repo_resolution WHERE repo=?", root).Scan(&complete)
-		if err == nil && complete == 1 {
-			return nil
-		}
-		if err != nil && err != sql.ErrNoRows {
-			return err
-		}
+// resolutionNeeded reports whether relation targets must be recomputed.
+// With no changed or deleted file, a complete previous pass is still exact,
+// so an unchanged refresh skips the work.
+func resolutionNeeded(ctx context.Context, tx *sql.Tx, root string, changed bool) (bool, error) {
+	if changed {
+		return true, nil
 	}
+	var complete int
+	err := tx.QueryRowContext(ctx, "SELECT complete FROM repo_resolution WHERE repo=?", root).Scan(&complete)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	return complete != 1, err
+}
+
+// resolveRepository recomputes every relation target of a generation.
+func resolveRepository(ctx context.Context, tx *sql.Tx, root string, goSources []goSource, goOverBudget bool) error {
 	// Edges derived by the Go type pass depend on other files, so they are
 	// always rebuilt. Lexical implements edges belong to their file.
 	if _, err := tx.ExecContext(ctx, "DELETE FROM relations WHERE repo=? AND kind IN ('implements','dispatch') AND id IN (SELECT relation_id FROM relation_targets WHERE hint='implements' OR substr(hint,1,9)='dispatch:')", root); err != nil {
@@ -370,22 +398,78 @@ func resolveRepository(ctx context.Context, tx *sql.Tx, root string, changed boo
 	return err
 }
 
-// warnedFiles returns the skipped sources of the previous generation.
-func warnedFiles(ctx context.Context, tx *sql.Tx, repo string) (map[string]bool, error) {
-	rows, err := tx.QueryContext(ctx, "SELECT path FROM file_warnings WHERE repo=?", repo)
+// cachedFile is the previous generation's record of a source.
+type cachedFile struct {
+	digest, stat string
+	// skipped files have a recorded warning and no declarations.
+	skipped bool
+}
+
+func loadFileCache(ctx context.Context, tx *sql.Tx, repo string) (map[string]cachedFile, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT c.path,c.digest,COALESCE(c.stat,''),w.path IS NOT NULL FROM file_cache_v2 c LEFT JOIN file_warnings w ON w.repo=c.repo AND w.path=c.path WHERE c.repo=?", repo)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	paths := map[string]bool{}
+	cache := map[string]cachedFile{}
 	for rows.Next() {
 		var path string
-		if err := rows.Scan(&path); err != nil {
+		var file cachedFile
+		if err := rows.Scan(&path, &file.digest, &file.stat, &file.skipped); err != nil {
 			return nil, err
 		}
-		paths[path] = true
+		cache[path] = file
 	}
-	return paths, rows.Err()
+	return cache, rows.Err()
+}
+
+func nullable(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// readUnchangedGoSources reads the Go sources the walk skipped by their stat
+// key (those with a nil src), anchored to the repository root like the walk.
+// A source replaced or removed since then is read as it is now (or left
+// out); its stored stat key no longer matches, so the next refresh analyzes
+// it again.
+func readUnchangedGoSources(root string, sources []goSource) ([]goSource, error) {
+	var anchor *os.Root
+	defer func() {
+		if anchor != nil {
+			anchor.Close()
+		}
+	}()
+	kept := sources[:0]
+	for _, source := range sources {
+		if source.src == nil {
+			if anchor == nil {
+				var err error
+				if anchor, err = os.OpenRoot(root); err != nil {
+					return nil, err
+				}
+			}
+			file, err := openRegularSource(anchor, filepath.FromSlash(source.rel))
+			if err != nil {
+				return nil, err
+			}
+			if file == nil {
+				continue
+			}
+			source.src, err = io.ReadAll(io.LimitReader(file, 8*1024*1024))
+			file.Close()
+			if err != nil {
+				return nil, err
+			}
+			if source.src == nil {
+				source.src = []byte{}
+			}
+		}
+		kept = append(kept, source)
+	}
+	return kept, nil
 }
 
 func removeFile(tx *sql.Tx, repo, path string) error {

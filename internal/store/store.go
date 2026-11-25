@@ -67,7 +67,7 @@ CREATE INDEX IF NOT EXISTS symbols_file ON symbols(file);
 CREATE INDEX IF NOT EXISTS symbols_repo_file ON symbols(repo,file,line);
 CREATE INDEX IF NOT EXISTS symbols_repo_name ON symbols(repo,name);
 CREATE TABLE IF NOT EXISTS file_cache (path TEXT PRIMARY KEY, mtime INTEGER NOT NULL, size INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS file_cache_v2 (repo TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(repo,path));
+CREATE TABLE IF NOT EXISTS file_cache_v2 (repo TEXT NOT NULL, path TEXT NOT NULL, digest TEXT NOT NULL, stat TEXT, PRIMARY KEY(repo,path));
 CREATE TABLE IF NOT EXISTS repo_state (repo TEXT PRIMARY KEY, indexed_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS symbol_embeddings (symbol_id TEXT PRIMARY KEY REFERENCES symbols(id) ON DELETE CASCADE,
   dim INTEGER NOT NULL, vector BLOB NOT NULL);
@@ -121,6 +121,19 @@ CREATE TABLE IF NOT EXISTS file_warnings(repo TEXT NOT NULL,path TEXT NOT NULL,w
 			return fmt.Errorf("clearing outdated embeddings: %w", err)
 		}
 	}
+	if version < 6 {
+		// Schema 6 records each source's stat key so a refresh can skip
+		// reading and hashing unchanged files.
+		var hasStat int
+		if err := tx.QueryRow("SELECT count(*) FROM pragma_table_info('file_cache_v2') WHERE name='stat'").Scan(&hasStat); err != nil {
+			return err
+		}
+		if hasStat == 0 {
+			if _, err := tx.Exec("ALTER TABLE file_cache_v2 ADD COLUMN stat TEXT"); err != nil {
+				return fmt.Errorf("adding file stat keys: %w", err)
+			}
+		}
+	}
 	if version < SchemaVersion {
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion)); err != nil {
 			return err
@@ -131,7 +144,7 @@ CREATE TABLE IF NOT EXISTS file_warnings(repo TEXT NOT NULL,path TEXT NOT NULL,w
 
 // SchemaVersion is the user_version of a fully migrated index. Read-only
 // commands never migrate, so they check it before using newer columns.
-const SchemaVersion = 5
+const SchemaVersion = 6
 
 // searchSchema indexes each symbol's name, its split identifier words
 // (terms) and its signature. Terms are computed in Go when a symbol is
