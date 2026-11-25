@@ -335,6 +335,8 @@ func TestRegressionCochangeIgnoresDiffRelativeConfig(t *testing.T) {
 	}
 	compareTestGit(t, root, "init", "-q")
 	compareTestGit(t, root, "config", "diff.relative", "true")
+	// log.showRoot=false would drop the root commit's files.
+	compareTestGit(t, root, "config", "log.showRoot", "false")
 	if err := os.MkdirAll(filepath.Join(root, "sub"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -419,5 +421,51 @@ func TestCochangeScopeBelowExcludedDirectory(t *testing.T) {
 	}
 	if len(pairs) != 1 || pairs[0].A != "app.json" || pairs[0].B != "main.go" {
 		t.Fatalf("root pairs: %+v", pairs)
+	}
+}
+
+// A scope inside a credential directory pairs nothing: built-in rules apply
+// to the path inside --repo, but credential locations are checked against the
+// whole working-tree path.
+func TestCochangeScopeInsideCredentialDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			".aws/sso/cache/tok.json": fmt.Sprintf("{\"t\": %d}\n", i),
+			".aws/x.py":               fmt.Sprintf("x = %d\n", i),
+			".docker/config.json":     fmt.Sprintf("{\"v\": %d}\n", i),
+			".docker/app.yaml":        fmt.Sprintf("v: %d\n", i),
+			"main.go":                 fmt.Sprintf("package main\nfunc M%d(){}\n", i),
+		} {
+			path := filepath.Join(root, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, ".aws"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 0 {
+		t.Fatalf(".aws scope paired credential paths: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), filepath.Join(root, ".docker"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pairs {
+		if p.A == "config.json" || p.B == "config.json" {
+			t.Fatalf(".docker scope paired config.json: %+v", pairs)
+		}
 	}
 }

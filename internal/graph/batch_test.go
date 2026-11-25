@@ -179,6 +179,15 @@ func TestFileBatchPrefersDeclarationWithBody(t *testing.T) {
 	if len(b.collisions) != 3 {
 		t.Fatalf("collisions: %v", b.collisions)
 	}
+	// A bodyless member signature (`interface I { f(): void }`) never
+	// replaces a function expression; only a declaration with a body does.
+	b = (&indexWriter{}).batch("a.ts")
+	b.expression("a.ts:f:1", "f", "func", 1, "expression")
+	b.call("a.ts:f:1", "f", "kept", 1, 10, "unresolved")
+	b.symbolBody("a.ts:f:1", "f", "method", 1, "member signature", false, "")
+	if got := kept(b); got != "symbol:expression call:kept" {
+		t.Fatalf("member signature after expression: kept %s", got)
+	}
 	// Two expressions: the first is kept.
 	b = (&indexWriter{}).batch("a.ts")
 	b.expression("a.ts:f:1", "f", "func", 1, "first")

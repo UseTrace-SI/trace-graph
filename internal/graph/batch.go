@@ -132,7 +132,7 @@ func (b *fileBatch) declare(id, name, kind string, line int, signature string, b
 		}
 		b.collisions = append(b.collisions, id)
 		implementation := bodyKnown && hasBody && b.bodyless[id] && b.scopes[id] == scope
-		if !implementation && !(bodyKnown && b.expressions[id]) {
+		if !implementation && !(bodyKnown && hasBody && b.expressions[id]) {
 			b.dropping = id
 			return
 		}

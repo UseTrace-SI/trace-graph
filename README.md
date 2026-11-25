@@ -29,7 +29,7 @@ trace-graph mcp                          # the same lookups as read-only MCP too
 
 ## What each language gets
 
-| Language (extensions) | Default build (`inventory-v10`) | Tree-sitter build (`treesitter-v7`) |
+| Language (extensions) | Default build (`inventory-v11`) | Tree-sitter build (`treesitter-v8`) |
 | --- | --- | --- |
 | Go (`.go`) | `go/parser` declarations (func, method, type, var/const) with extents; calls resolved package-wide by `go/types` (`typed`) or syntax evidence; `implements` and interface `dispatch` edges; net/http, gorilla, chi, gin and echo routes | grammar declarations; calls observed, targets unresolved; no type pass |
 | TypeScript / JavaScript (`.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs`) | declaration-aware lexical analysis: declarations with extents and containers, calls resolved through same-file declarations and explicit imports, imports resolved to repository files, `extends`/`implements`, Express/Hono routes | grammar declarations; calls observed, unresolved; imports and routes from the shared lexical extractor, resolved to module files |
@@ -243,7 +243,7 @@ decorated Python route functions.
 
 Graph honors the same project-root `.traceignore` syntax as CLI capture. An
 excluded file's old derived symbols disappear on the next successful generation.
-This upgrade (analyzer `inventory-v10`, Tree-sitter `treesitter-v7`) re-analyzes
+This upgrade (analyzer `inventory-v11`, Tree-sitter `treesitter-v8`) re-analyzes
 every file once on the next refresh; existing data is kept until then.
 
 ## Impact, health and graph snapshots

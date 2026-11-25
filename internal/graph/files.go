@@ -94,11 +94,38 @@ func CochangeScope(ctx context.Context, repo string) (func(gitPath string) (stri
 	}
 	return func(gitPath string) (string, bool) {
 		rel, under := strings.CutPrefix(gitPath, prefix)
-		if !under || rel == "" || !CochangeFile(rel) || agentConfig(gitPath) || topIgnored(gitPath) || subPolicy(rel) {
+		if !under || rel == "" || !CochangeFile(rel) || secretLocation(gitPath) || agentConfig(gitPath) || topIgnored(gitPath) || subPolicy(rel) {
 			return "", false
 		}
 		return rel, true
 	}, nil
+}
+
+// secretLocation reports whether a working-tree-relative path lies in a
+// credential directory (.aws, .ssh, .env*, a *.pem or *.key directory, an SSH
+// key name) or is a credential file named by its location (.docker/config.json,
+// .kube/config). Unlike excludedSource it ignores vendor and node_modules, so a
+// --repo scope below vendor/ still pairs its files, while a scope inside a
+// credential directory pairs nothing.
+func secretLocation(gitPath string) bool {
+	p := foldPath(filepath.ToSlash(gitPath))
+	parts := strings.Split(p, "/")
+	for _, part := range parts[:len(parts)-1] {
+		if part == ".aws" || part == ".ssh" || strings.HasPrefix(part, ".env") || strings.HasSuffix(part, ".pem") || strings.HasSuffix(part, ".key") {
+			return true
+		}
+		for _, key := range sshKeyPrefixes {
+			if strings.HasPrefix(part, key) {
+				return true
+			}
+		}
+	}
+	for _, file := range secretFiles {
+		if p == file || strings.HasSuffix(p, "/"+file) {
+			return true
+		}
+	}
+	return false
 }
 
 func pathBase(slashed string) string {

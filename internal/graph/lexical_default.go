@@ -265,6 +265,9 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 				if lexKeywords[lang][name] {
 					break
 				}
+				if k > 0 && !lexParamsFollow(seg[m[3]:]) {
+					break // prose such as JSX text: `{n} function calls`
+				}
 				if p.member && scope == nil {
 					continue // a method shape outside a class body is a call
 				}
@@ -528,6 +531,30 @@ func lexNextStatement(lang, text string, from int) int {
 		}
 	}
 	return -1
+}
+
+// lexParamsFollow reports whether rest, the text after a declared function
+// name, opens a parameter list, optionally after type parameters: `(a)` or
+// `<T>(a)`. A function declared after another statement on the same line must
+// have one, which keeps prose (for example JSX text) from declaring symbols.
+func lexParamsFollow(rest string) bool {
+	rest = strings.TrimLeft(rest, " \t")
+	if strings.HasPrefix(rest, "<") {
+		depth := 0
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case '<':
+				depth++
+			case '>':
+				if depth--; depth == 0 {
+					rest = strings.TrimLeft(rest[i+1:], " \t")
+					return strings.HasPrefix(rest, "(")
+				}
+			}
+		}
+		return false
+	}
+	return strings.HasPrefix(rest, "(")
 }
 
 // lexStatementStart reports whether masked code ending in before leaves the

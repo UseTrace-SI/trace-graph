@@ -375,6 +375,10 @@ func TestLexicalDeclarationAfterStatementOnItsLine(t *testing.T) {
 		{"}); function g() {}\n", ""},
 		{"foo(a; function g() {})\n", ""},
 		{"x = function g() {}; y()\n", ""},
+		{"const el = <p>{count} function calls</p>;\n", ""},
+		{"const li = <li>Use a callback; function components re-render</li>;\n", ""},
+		{"a(); function g<T>(x: T) { return x }\n", "g"},
+		{"a(); function g <T extends Map<string, number>> (x: T) {}\n", "g"},
 	} {
 		decls := lexDeclarations("typescript", newLexSource("typescript", tc.src))
 		var names []string

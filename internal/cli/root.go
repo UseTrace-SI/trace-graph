@@ -325,7 +325,7 @@ func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxByte
 	// print paths relative to a subdirectory --repo instead of the
 	// working-tree root CochangeScope expects. Overriding the setting works
 	// with every Git release; --no-relative fails before Git 2.28.
-	gitcmd := graph.LocalGitCommand(ctx, repo, "-c", "diff.relative=false", "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount), "--", ".")
+	gitcmd := graph.LocalGitCommand(ctx, repo, "-c", "diff.relative=false", "-c", "log.showSignature=false", "-c", "log.showRoot=true", "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount), "--", ".")
 	pipe, err := gitcmd.StdoutPipe()
 	if err != nil {
 		return nil, err
