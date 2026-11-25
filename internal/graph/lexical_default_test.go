@@ -206,10 +206,7 @@ func TestLexicalAnalysisOfLargeFilesIsLinear(t *testing.T) {
 	if len(decls) != functions || len(calls) != 2*functions {
 		t.Fatalf("%d declarations and %d calls", len(decls), len(calls))
 	}
-	if elapsed > 30*time.Second*raceSlowdown {
-		t.Fatalf("lexical analysis of %d functions took %v", functions, elapsed)
-	}
-	t.Logf("%d functions analyzed in %v", functions, elapsed)
+	checkBudget(t, elapsed, 30*time.Second, fmt.Sprintf("lexical analysis of %d functions", functions))
 }
 
 // A single-component absolute Python module (`from tool import run`, with
@@ -258,9 +255,11 @@ func TestLexicalBodySearchesAreBounded(t *testing.T) {
 		s := newLexSource(tc.lang, tc.src)
 		decls := lexDeclarations(tc.lang, s)
 		lexCalls(tc.lang, s, decls)
-		if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown || len(decls) == 0 {
-			t.Fatalf("%s: %d declarations in %v", tc.lang, len(decls), elapsed)
+		elapsed := time.Since(start)
+		if len(decls) == 0 {
+			t.Fatalf("%s: no declarations", tc.lang)
 		}
+		checkBudget(t, elapsed, 10*time.Second, tc.lang+" analysis")
 	}
 }
 
