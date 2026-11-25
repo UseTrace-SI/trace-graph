@@ -190,8 +190,8 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 	n, read, analyzed := 0, 0, 0
 	var totalBytes int64
 	// Every Go file, cached or not, takes part in package-wide type checking,
-	// except files with collision warnings, whose identities are ambiguous. Sources
-	// skipped by their stat key are read only if the pass runs.
+	// except files with collision warnings, whose identities are ambiguous.
+	// Sources skipped by their stat key are read only if the pass runs.
 	var goSources []goSource
 	goBytes, goOverBudget := 0, false
 	// Directories holding type-checked sources; see goDirectoryDigest.

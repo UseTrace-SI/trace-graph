@@ -25,7 +25,7 @@ var (
 	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml cargo.lock poetry.lock pipfile.lock composer.lock gemfile.lock go.sum")
 )
 
-// CochangeFile reports paths co-change history pairs: indexable sources and
+// CochangeFile reports whether cochange pairs rel: indexable sources and
 // common configuration files (YAML, JSON, TOML, Dockerfiles, Makefiles,
 // Terraform, ...). The secret and generated-state exclusions of indexing
 // apply, and lockfiles, which change with every manifest edit, are left out.
