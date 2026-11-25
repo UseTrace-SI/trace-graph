@@ -13,6 +13,25 @@ import (
 
 func scopedID(repo, id string) string { return fmt.Sprintf("%x:%s", sha256.Sum256([]byte(repo)), id) }
 
+// ScopedID returns the stored identity of a repository-relative symbol or
+// relation ID: the SHA-256 of the canonical repository path, a colon and the
+// ID. Stored IDs stay unique across repositories sharing one database.
+func ScopedID(repo, id string) string { return scopedID(repo, id) }
+
+// UnscopedID strips the repository hash of a stored ID. Output scoped to one
+// repository shows IDs this way; ScopedID restores them.
+func UnscopedID(id string) string {
+	if len(id) > 65 && id[64] == ':' {
+		for i := 0; i < 64; i++ {
+			if c := id[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return id
+			}
+		}
+		return id[65:]
+	}
+	return id
+}
+
 // goSymbolID is the unscoped identity of a declaration at a physical line.
 func goSymbolID(rel, name string, line int) string { return rel + ":" + name + ":" + itoa(line) }
 

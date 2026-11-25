@@ -3,7 +3,18 @@ package cli
 import (
 	"context"
 	"database/sql"
+
+	"github.com/UseTrace-SI/trace-graph/internal/graph"
 )
+
+// publicSymbols shows symbol IDs without the repository hash. Every lookup
+// is scoped to one repository, and selectors accept either form.
+func publicSymbols(symbols []codeSymbol) []codeSymbol {
+	for i := range symbols {
+		symbols[i].ID = graph.UnscopedID(symbols[i].ID)
+	}
+	return symbols
+}
 
 // sqlLimit turns a limit below 1 into SQLite's unbounded LIMIT -1.
 func sqlLimit(limit int) int {
@@ -29,7 +40,7 @@ func lookupDefinitions(ctx context.Context, db *sql.DB, repo, name string, limit
 		}
 		defs = append(defs, s)
 	}
-	return defs, rows.Err()
+	return publicSymbols(defs), rows.Err()
 }
 
 // callerRef is a call or dispatch site that reaches a symbol.
@@ -44,13 +55,15 @@ type neighborsResult struct {
 	Callers     []callerRef  `json:"callers"`
 }
 
-// lookupNeighbors lists the definitions of a symbol name or ID and the
+// lookupNeighbors lists the definitions of a symbol name or ID (with or
+// without the repository hash) and the
 // direct callers that reach them through resolved call and dispatch edges,
 // or through unresolved calls of the same name. A limit below 1 is
 // unbounded; it applies to each list.
 func lookupNeighbors(ctx context.Context, db *sql.DB, repo, selector string, limit int) (neighborsResult, error) {
 	result := neighborsResult{Definitions: []codeSymbol{}, Callers: []callerRef{}}
-	rows, err := db.QueryContext(ctx, "SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE (name=? OR id=?) AND repo=? ORDER BY file,line,id LIMIT ?", selector, selector, repo, sqlLimit(limit))
+	scoped := graph.ScopedID(repo, selector)
+	rows, err := db.QueryContext(ctx, "SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE (name=? OR id IN (?,?)) AND repo=? ORDER BY file,line,id LIMIT ?", selector, selector, scoped, repo, sqlLimit(limit))
 	if err != nil {
 		return result, err
 	}
@@ -67,8 +80,9 @@ func lookupNeighbors(ctx context.Context, db *sql.DB, repo, selector string, lim
 	if err != nil {
 		return result, err
 	}
+	publicSymbols(result.Definitions)
 	rows, err = db.QueryContext(ctx, `SELECT DISTINCT r.from_symbol,r.file,r.line FROM relations r LEFT JOIN relation_targets t ON t.relation_id=r.id
- WHERE r.repo=? AND r.kind IN ('call','dispatch') AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line LIMIT ?`, repo, repo, selector, selector, selector, sqlLimit(limit))
+ WHERE r.repo=? AND r.kind IN ('call','dispatch') AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id IN (?,?))) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line LIMIT ?`, repo, repo, selector, selector, scoped, selector, sqlLimit(limit))
 	if err != nil {
 		return result, err
 	}

@@ -109,32 +109,82 @@ func analyzeCmd() *cobra.Command {
 	}}
 }
 
+// symbolList is the --json form of symbols and query.
+type symbolList struct {
+	Protocol  int          `json:"protocol"`
+	Repo      string       `json:"repo"`
+	Symbols   []codeSymbol `json:"symbols"`
+	Truncated bool         `json:"truncated"`
+}
+
+// printSymbols writes at most limit symbols (all when limit is 0) as lines
+// or, with asJSON, as one symbolList. symbols may hold one extra entry
+// that only marks the list truncated.
+func printSymbols(cmd *cobra.Command, symbols []codeSymbol, limit int, asJSON bool) error {
+	out := symbolList{Protocol: 1, Repo: repoPath, Symbols: publicSymbols(symbols)}
+	if limit > 0 && len(out.Symbols) > limit {
+		out.Symbols, out.Truncated = out.Symbols[:limit], true
+	}
+	if asJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
+	}
+	for _, s := range out.Symbols {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  %s  %s\n", s.File, s.Line, s.Kind, s.Name)
+	}
+	return nil
+}
+
+// probeLimit fetches one row beyond a positive limit, so printSymbols can
+// tell a complete list from a truncated one. 0 stays unbounded.
+func probeLimit(limit int) int {
+	if limit > 0 {
+		return limit + 1
+	}
+	return 0
+}
+
 func symbolsCmd() *cobra.Command {
-	return &cobra.Command{Use: "symbols", RunE: func(cmd *cobra.Command, args []string) error {
+	var limit int
+	var asJSON bool
+	cmd := &cobra.Command{Use: "symbols", Short: "List indexed symbols as file:line kind name", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		if limit < 0 {
+			return fmt.Errorf("limit must not be negative")
+		}
 		db, err := readIndex()
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query("SELECT file,name,kind,line FROM symbols WHERE repo=? ORDER BY file,line", repoPath)
+		rows, err := db.QueryContext(cmd.Context(), "SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE repo=? ORDER BY file,line,id LIMIT ?", repoPath, sqlLimit(probeLimit(limit)))
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
+		symbols := []codeSymbol{}
 		for rows.Next() {
-			var file, name, kind string
-			var line int
-			if err := rows.Scan(&file, &name, &kind, &line); err != nil {
+			var s codeSymbol
+			if err := rows.Scan(&s.ID, &s.File, &s.Name, &s.Kind, &s.Line, &s.Signature); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  %s  %s\n", file, line, kind, name)
+			symbols = append(symbols, s)
 		}
-		return rows.Err()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return printSymbols(cmd, symbols, limit, asJSON)
 	}}
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum symbols (0 lists all)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit protocol-1 JSON with IDs and signatures")
+	return cmd
 }
 
 func queryCmd() *cobra.Command {
-	return &cobra.Command{Use: "query", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	var limit int
+	var asJSON bool
+	cmd := &cobra.Command{Use: "query <words>", Short: "Search symbols by name prefix and identifier words, best match first", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if limit < 0 {
+			return fmt.Errorf("limit must not be negative")
+		}
 		text := strings.Join(args, " ")
 		if len(text) > 4096 {
 			return fmt.Errorf("query exceeds 4096 bytes")
@@ -144,15 +194,18 @@ func queryCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		symbols, _, err := searchSymbols(cmd.Context(), db, repoPath, text, "", 0)
+		symbols, _, err := searchSymbols(cmd.Context(), db, repoPath, text, "", probeLimit(limit))
 		if err != nil {
 			return err
 		}
-		for _, s := range symbols {
-			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  %s  %s\n", s.File, s.Line, s.Kind, s.Name)
+		if symbols == nil {
+			symbols = []codeSymbol{}
 		}
-		return nil
+		return printSymbols(cmd, symbols, limit, asJSON)
 	}}
+	cmd.Flags().IntVar(&limit, "limit", 0, "maximum symbols (0 lists every match)")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit protocol-1 JSON with IDs and signatures")
+	return cmd
 }
 
 func neighborsCmd() *cobra.Command {

@@ -191,6 +191,11 @@ func codeContextFor(ctx context.Context, dbFile, repo, path, query string, limit
 			return codeContext{}, err
 		}
 	}
+	// Lookups above use stored IDs; the protocol shows them unscoped.
+	publicSymbols(out.Symbols)
+	for i := range out.Relations {
+		out.Relations[i].FromID, out.Relations[i].ToID = graph.UnscopedID(out.Relations[i].FromID), graph.UnscopedID(out.Relations[i].ToID)
+	}
 	out.Status = "ready"
 	return out, nil
 }

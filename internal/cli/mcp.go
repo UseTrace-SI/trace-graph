@@ -123,7 +123,7 @@ func (s *mcpServer) search(ctx context.Context, _ *mcp.CallToolRequest, in mcpSe
 	if !ok {
 		return nil, mcpSymbolsOutput{}, fmt.Errorf("query has no words to search for")
 	}
-	out := mcpSymbolsOutput{Repo: s.repo, Symbols: symbols}
+	out := mcpSymbolsOutput{Repo: s.repo, Symbols: publicSymbols(symbols)}
 	if len(out.Symbols) > limit {
 		out.Symbols, out.Truncated = out.Symbols[:limit], true
 	}

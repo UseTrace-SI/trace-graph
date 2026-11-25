@@ -122,7 +122,7 @@ func impactFor(ctx context.Context, db *sql.DB, repo, selector, direction string
 	if err := tx.QueryRowContext(ctx, "SELECT indexed_at FROM repo_state WHERE repo=?", repo).Scan(&out.IndexedAt); err != nil {
 		return impactReport{}, fmt.Errorf("index unavailable; run trace-graph refresh: %w", err)
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE repo=? AND (name=? OR id=?) ORDER BY file,line,id LIMIT 2", repo, selector, selector)
+	rows, err := tx.QueryContext(ctx, "SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE repo=? AND (name=? OR id IN (?,?)) ORDER BY file,line,id LIMIT 2", repo, selector, selector, graph.ScopedID(repo, selector))
 	if err != nil {
 		return impactReport{}, err
 	}
@@ -149,6 +149,11 @@ func impactFor(ctx context.Context, db *sql.DB, repo, selector, direction string
 	out.Symbol = roots[0]
 	if err := expandImpact(ctx, tx, &out, repo, direction, depth, limit); err != nil {
 		return impactReport{}, err
+	}
+	// The walk follows stored IDs; the report shows them unscoped.
+	out.Symbol.ID = graph.UnscopedID(out.Symbol.ID)
+	for i := range out.Nodes {
+		out.Nodes[i].ID, out.Nodes[i].Via = graph.UnscopedID(out.Nodes[i].ID), graph.UnscopedID(out.Nodes[i].Via)
 	}
 	return out, nil
 }

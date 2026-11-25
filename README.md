@@ -18,8 +18,8 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 
 - `trace-graph version` — print the coordinated bundle version.
 - `trace-graph analyze [--repo .]` — index the current checkout in place.
-- `trace-graph symbols` — list indexed symbols as `file:line kind name`.
-- `trace-graph query <term>` — ranked symbol search. Words match name
+- `trace-graph symbols [--limit N] [--json]` — list indexed symbols as `file:line kind name` (all by default).
+- `trace-graph query <words> [--limit N] [--json]` — ranked symbol search (every match by default). Words match name
   prefixes and split identifier words (`analyze` finds `AnalyzeRepo` and
   `analyzeFile`; `repo` finds `AnalyzeRepoContext`; `http` finds
   `parse_http_request`) as well as literal signature words. An exact name
@@ -37,6 +37,17 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 - `trace-graph context [--path FILE] [--query words] [--limit 20] [--semantic]` — bounded, read-only protocol-1 JSON; `--query` uses the ranked `query` search even with `--path`, and `--semantic` reranks a bounded candidate set (the 500 best search matches plus up to 500 symbols in files whose path contains a query word, within `--path` when given) by local embeddings.
 - `trace-graph refresh [--repo .]` — index and return protocol-1 JSON.
 - `trace-graph mcp [--repo .]` — serve read-only MCP tools over stdio (see below).
+
+`--json` on `symbols` and `query` prints one protocol-1 object
+(`repo`, `symbols` with `id`, `file`, `name`, `kind`, `line`, `signature`,
+and `truncated` when `--limit` cut the list).
+
+Symbol IDs are stored as `<sha256 of the repository path>:<file>:<name>:<line>`
+so several repositories can share one database. Output scoped to one
+repository (`context`, `impact --json`, `--json` lists and MCP tools) shows
+them without the 64-character hash, as `<file>:<name>:<line>`; `impact`,
+`neighbors` and the MCP tools accept either form. `snapshot`, `changes` and
+`compare` keep the stored form.
 
 All analysis and inspection commands remain repository-scoped. `cochange` uses
 the same supported-file and exclusion policy as indexing, scans at most
