@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +62,7 @@ func goEdges(t *testing.T, db *sql.DB, root, kind string) map[string]goEdge {
 		if err := rows.Scan(&from, &to, &line, &resolution, &target); err != nil {
 			t.Fatal(err)
 		}
-		key := from + "->" + to + "@" + itoa(line)
+		key := from + "->" + to + "@" + strconv.Itoa(line)
 		if previous, ok := edges[key]; ok {
 			target = previous.target + "|" + unscoped(target)
 		} else {

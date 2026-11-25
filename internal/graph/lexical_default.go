@@ -5,6 +5,7 @@ package graph
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -49,7 +50,7 @@ const (
 )
 
 var jsPatterns = []lexPattern{
-	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)`), kind: "func", callable: true},
+	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function(?:\s+|\s*\*\s*)([A-Za-z_$][\w$]*)`), kind: "func", callable: true},
 	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)`), kind: "type", scope: true},
 	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:declare\s+)?interface\s+([A-Za-z_$][\w$]*)`), kind: "type"},
 	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:declare\s+)?(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)`), kind: "type"},
@@ -114,28 +115,27 @@ func wordSet(words string) map[string]bool {
 // lexDeclarationLanguage reports languages with declaration-aware analysis.
 func lexDeclarationLanguage(lang string) bool { _, ok := lexPatterns[lang]; return ok }
 
-func analyzeLexicalFile(lang, repo, rel, src string, db *indexWriter) (int, error) {
+func analyzeLexicalFile(lang, repo, rel, src string, out *fileBatch) (int, error) {
 	s := newLexSource(lang, src)
 	decls := lexDeclarations(lang, s)
 	// Hashes keep string literals: a literal-only edit is a source change.
 	hashText := maskSource(lang, src, true)
 	for _, d := range decls {
 		d.id = goSymbolID(rel, d.name, d.line)
-		db.namespace = lexNamespace(rel, d.container, d.static, d.exported)
-		db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-			d.id, repo, rel, d.name, d.kind, d.line, d.signature)
-		db.content(repo, d.id, lexContent(s, hashText, d), d.endLine)
+		out.namespace = lexNamespace(rel, d.container, d.static, d.exported)
+		out.symbol(d.id, d.name, d.kind, d.line, d.signature)
+		out.content(d.id, lexContent(s, hashText, d), d.endLine)
 	}
-	db.namespace = lexNamespace(rel, "", false, false)
+	out.namespace = lexNamespace(rel, "", false, false)
 	for _, d := range decls {
 		for _, super := range d.supers {
 			id := d.id + "->" + super.kind + ":" + super.qualifier + "." + super.name
-			db.relation(repo, rel, id, d.id, d.name, super.name, super.kind, d.line, "lextype\x1f"+super.qualifier)
+			out.relation(id, d.id, d.name, super.name, super.kind, d.line, "lextype\x1f"+super.qualifier)
 		}
 	}
 	for _, call := range lexCalls(lang, s, decls) {
 		line, column := s.position(call.offset)
-		db.relation(repo, rel, goRelationID(call.from.id, call.name, line, column), call.from.id, call.from.name, call.name, "call", line, call.hint)
+		out.relation(goRelationID(call.from.id, call.name, line, column), call.from.id, call.from.name, call.name, "call", line, call.hint)
 	}
 	var callables []*lexDecl
 	for _, d := range decls {
@@ -143,7 +143,7 @@ func analyzeLexicalFile(lang, repo, rel, src string, db *indexWriter) (int, erro
 			callables = append(callables, d)
 		}
 	}
-	writeLexRelations(lang, repo, rel, s, db, func(offset int) (string, string) {
+	writeLexRelations(lang, repo, rel, s, out, func(offset int) (string, string) {
 		if from := innermost(callables, offset); from != nil {
 			return from.id, from.name
 		}
@@ -246,52 +246,70 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 		if scope != nil && lang != "python" && depths[line-1] != scope.bodyDepth+1 {
 			scope = nil // nested deeper, for example inside a method body
 		}
-		for _, p := range lexPatterns[lang] {
-			m := p.re.FindStringSubmatchIndex(text)
-			if m == nil {
-				continue
+		// A JavaScript/TypeScript line without a declaration at its start
+		// may still declare a function after a statement that ends on it,
+		// as in `foo(function h() {}); export function h(a: any) { ... }`.
+		// Later statements are tried for function declarations only.
+		declared := false
+		for k := 0; k >= 0 && !declared; k = lexNextStatement(lang, text, k) {
+			seg, segStart, patterns := text[k:], start+k, lexPatterns[lang]
+			if k > 0 {
+				patterns = patterns[:1]
 			}
-			name := text[m[2]:m[3]]
-			if lexKeywords[lang][name] {
-				break
-			}
-			if p.member && scope == nil {
-				continue // a method shape outside a class body is a call
-			}
-			if lang == "java" && p.member && !javaMethodShape(text[:m[2]], name, scope.name) {
-				break
-			}
-			d := &lexDecl{name: name, kind: p.kind, offset: start, paramStart: start + m[3], line: line, callable: p.callable, scope: p.scope, signature: strings.TrimSpace(text)}
-			d.exported = (lang == "javascript" || lang == "typescript") && jsExportedLine.MatchString(text)
-			if scope != nil {
-				d.container = scope.name
-				switch {
-				case lang == "rust":
-					d.static = scope.kind == "impl"
-				default:
-					d.static = lexStaticWord.MatchString(text[:m[2]])
+			for _, p := range patterns {
+				m := p.re.FindStringSubmatchIndex(seg)
+				if m == nil {
+					continue
 				}
+				name := seg[m[2]:m[3]]
+				if lexKeywords[lang][name] {
+					break
+				}
+				if k > 0 && !lexParamsFollow(seg[m[3]:]) {
+					break // prose such as JSX text: `{n} function calls`
+				}
+				if p.member && scope == nil {
+					continue // a method shape outside a class body is a call
+				}
+				if lang == "java" && p.member && !javaMethodShape(seg[:m[2]], name, scope.name) {
+					break
+				}
+				d := &lexDecl{name: name, kind: p.kind, offset: segStart, paramStart: segStart + m[3], line: line, callable: p.callable, scope: p.scope, signature: strings.TrimSpace(seg)}
+				d.exported = (lang == "javascript" || lang == "typescript") && jsExportedLine.MatchString(seg)
+				if scope != nil {
+					d.container = scope.name
+					switch {
+					case lang == "rust":
+						d.static = scope.kind == "impl"
+					default:
+						d.static = lexStaticWord.MatchString(seg[:m[2]])
+					}
+				}
+				if enclosing != nil && enclosing.callable && (scope == nil || enclosing.bodyStart > scope.bodyStart) {
+					d.container, d.static = lexLocalContainer, false
+				}
+				if lang == "python" {
+					pyBody(s, d, line)
+				} else {
+					lexBody(lang, s, d, segStart+m[3])
+					if d.callable && d.bodyStart < 0 && (lang == "javascript" || lang == "typescript") {
+						lexOverloadBody(lang, s, d, seg, segStart, m[3])
+					}
+				}
+				d.supers = lexHeritage(lang, seg, m[3])
+				key := d.name + "\x00" + strconv.Itoa(d.line)
+				if seen[key] {
+					break // one identity per name and line
+				}
+				seen[key] = true
+				decls = append(decls, d)
+				if d.scope {
+					scopes = append(scopes, d)
+				}
+				push(d)
+				declared = true
+				break
 			}
-			if enclosing != nil && enclosing.callable && (scope == nil || enclosing.bodyStart > scope.bodyStart) {
-				d.container, d.static = lexLocalContainer, false
-			}
-			if lang == "python" {
-				pyBody(s, d, line)
-			} else {
-				lexBody(lang, s, d, start+m[3])
-			}
-			d.supers = lexHeritage(lang, text, m[3])
-			key := d.name + "\x00" + itoa(d.line)
-			if seen[key] {
-				break // one identity per name and line
-			}
-			seen[key] = true
-			decls = append(decls, d)
-			if d.scope {
-				scopes = append(scopes, d)
-			}
-			push(d)
-			break
 		}
 	}
 	if lang == "javascript" || lang == "typescript" {
@@ -443,6 +461,139 @@ func depthAt(s *lexSource, depths []int, offset int) int {
 // unless the next line continues the declaration. A bodyless declaration (a
 // TypeScript overload or a type alias written without semicolons) therefore
 // never takes a later declaration's body, and each search is bounded.
+// lexOverloadBody gives a bodyless TypeScript function declaration the body
+// of a later declaration of the same name on its line, as in
+// `function f(a: string): void; function f(a: any) { ... }`. The line holds
+// one identity, which then describes the implementation rather than the
+// overload signature. A candidate must start a statement at the signature's
+// nesting level (after `;` or `}`, optionally behind export, default, async
+// or declare): a same-named function expression passed as an argument or a
+// declaration inside another body is a different function.
+func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, after int) {
+	rest := text[after:]
+	if !strings.Contains(rest, "function") {
+		return
+	}
+	later := regexp.MustCompile(`\bfunction(?:\s+|\s*\*\s*)` + regexp.QuoteMeta(d.name))
+	for _, m := range later.FindAllStringIndex(rest, -1) {
+		if m[1] < len(rest) && (rest[m[1]] >= 0x80 || lexIdentByte(rest[m[1]], true)) {
+			continue // a longer name
+		}
+		if !lexStatementStart(rest[:m[0]]) || !lexBalanced(rest[:m[0]]) {
+			continue
+		}
+		candidate := *d
+		lexBody(lang, s, &candidate, start+after+m[1])
+		if candidate.bodyStart >= 0 {
+			d.paramStart = start + after + m[1]
+			d.bodyStart, d.bodyEnd, d.endLine = candidate.bodyStart, candidate.bodyEnd, candidate.endLine
+			return
+		}
+	}
+}
+
+// lexNextStatement returns the offset after the next `;` or `}` of a
+// JavaScript/TypeScript line, from offset from, that ends a statement at the
+// nesting level the line starts at and is followed by a word that can start
+// a function declaration, or -1. Offset from is at that level, so successive
+// calls scan the line once.
+func lexNextStatement(lang, text string, from int) int {
+	if lang != "javascript" && lang != "typescript" {
+		return -1
+	}
+	depth := 0
+	for i := from; i < len(text); i++ {
+		switch text[i] {
+		case '{', '(', '[':
+			depth++
+			continue
+		case ')', ']':
+			if depth--; depth < 0 {
+				return -1
+			}
+			continue
+		case '}':
+			if depth--; depth < 0 {
+				return -1
+			}
+		case ';':
+		default:
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		next := strings.TrimLeft(text[i+1:], " \t")
+		for _, word := range []string{"function", "export", "default", "declare", "async"} {
+			if strings.HasPrefix(next, word) {
+				return i + 1
+			}
+		}
+	}
+	return -1
+}
+
+// lexParamsFollow reports whether rest, the text after a declared function
+// name, opens a parameter list, optionally after type parameters: `(a)` or
+// `<T>(a)`. A function declared after another statement on the same line must
+// have one, which keeps prose (for example JSX text) from declaring symbols.
+func lexParamsFollow(rest string) bool {
+	rest = strings.TrimLeft(rest, " \t")
+	if strings.HasPrefix(rest, "<") {
+		depth := 0
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case '<':
+				depth++
+			case '>':
+				if depth--; depth == 0 {
+					rest = strings.TrimLeft(rest[i+1:], " \t")
+					return strings.HasPrefix(rest, "(")
+				}
+			}
+		}
+		return false
+	}
+	return strings.HasPrefix(rest, "(")
+}
+
+// lexStatementStart reports whether masked code ending in before leaves the
+// next token at the start of a statement.
+func lexStatementStart(before string) bool {
+	for {
+		before = strings.TrimRight(before, " \t")
+		trimmed := false
+		for _, keyword := range []string{"export", "default", "async", "declare"} {
+			if strings.HasSuffix(before, keyword) && (len(before) == len(keyword) || !lexIdentByte(before[len(before)-len(keyword)-1], true) && before[len(before)-len(keyword)-1] < 0x80) {
+				before = before[:len(before)-len(keyword)]
+				trimmed = true
+				break
+			}
+		}
+		if !trimmed {
+			break
+		}
+	}
+	return strings.HasSuffix(before, ";") || strings.HasSuffix(before, "}")
+}
+
+// lexBalanced reports whether masked code closes every bracket it opens and
+// never closes one it did not open.
+func lexBalanced(code string) bool {
+	depth := 0
+	for i := 0; i < len(code); i++ {
+		switch code[i] {
+		case '{', '(', '[':
+			depth++
+		case '}', ')', ']':
+			if depth--; depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
+}
+
 func lexBody(lang string, s *lexSource, d *lexDecl, from int) {
 	d.bodyStart, d.bodyEnd, d.endLine = -1, -1, d.line
 	parens, arrow := 0, -1

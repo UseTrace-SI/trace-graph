@@ -4,6 +4,7 @@ package graph
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	ts "github.com/tree-sitter/go-tree-sitter"
@@ -18,21 +19,38 @@ import (
 	tsts "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
-var tsLangs = map[string]*ts.Language{
-	".go":   ts.NewLanguage(tsgo.Language()),
-	".py":   ts.NewLanguage(tspy.Language()),
-	".js":   ts.NewLanguage(tsjs.Language()),
-	".ts":   ts.NewLanguage(tsts.LanguageTypescript()),
-	".tsx":  ts.NewLanguage(tsts.LanguageTSX()),
-	".rs":   ts.NewLanguage(tsrs.Language()),
-	".java": ts.NewLanguage(tsja.Language()),
-	".c":    ts.NewLanguage(tsc.Language()),
-	".cpp":  ts.NewLanguage(tscpp.Language()),
-	".cc":   ts.NewLanguage(tscpp.Language()),
-	".rb":   ts.NewLanguage(tsrb.Language()),
-}
+// tsLangs maps supported extensions to grammars. Headers (.h) may be C or
+// C++; the C++ grammar parses both.
+var tsLangs = func() map[string]*ts.Language {
+	javascript := ts.NewLanguage(tsjs.Language())
+	typescript := ts.NewLanguage(tsts.LanguageTypescript())
+	cpp := ts.NewLanguage(tscpp.Language())
+	return map[string]*ts.Language{
+		".go":   ts.NewLanguage(tsgo.Language()),
+		".py":   ts.NewLanguage(tspy.Language()),
+		".js":   javascript,
+		".jsx":  javascript,
+		".mjs":  javascript,
+		".cjs":  javascript,
+		".ts":   typescript,
+		".mts":  typescript,
+		".cts":  typescript,
+		".tsx":  ts.NewLanguage(tsts.LanguageTSX()),
+		".rs":   ts.NewLanguage(tsrs.Language()),
+		".java": ts.NewLanguage(tsja.Language()),
+		".c":    ts.NewLanguage(tsc.Language()),
+		".cpp":  cpp,
+		".cc":   cpp,
+		".cxx":  cpp,
+		".h":    cpp,
+		".hh":   cpp,
+		".hpp":  cpp,
+		".hxx":  cpp,
+		".rb":   ts.NewLanguage(tsrb.Language()),
+	}
+}()
 
-const analyzerVersion = "treesitter-v5"
+const analyzerVersion = "treesitter-v8"
 
 func supportedFile(ext string) bool { _, ok := tsLangs[ext]; return ok }
 
@@ -89,8 +107,21 @@ func tsDeclarationName(node *ts.Node) *ts.Node {
 	return nil
 }
 
-func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, error) {
-	db.namespace = rel
+// tsScope identifies the node a declaration belongs to, looking through an
+// export statement, so sibling declarations share it.
+func tsScope(node *ts.Node) string {
+	parent := node.Parent()
+	if parent != nil && parent.Kind() == "export_statement" {
+		parent = parent.Parent()
+	}
+	if parent == nil {
+		return ""
+	}
+	return strconv.FormatUint(uint64(parent.Id()), 10)
+}
+
+func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error) {
+	out.namespace = rel
 	n := 0
 	lang := tsLangs[strings.ToLower(filepathExt(rel))]
 	parser := ts.NewParser()
@@ -119,10 +150,16 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 				strings.Contains(kind, "trait") || strings.Contains(kind, "interface") || strings.Contains(kind, "type") {
 				symKind = "type"
 			}
-			id := rel + ":" + name + ":" + itoa(line)
-			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-				id, repo, rel, name, symKind, line, kind+" "+name)
-			db.content(repo, id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
+			id := rel + ":" + name + ":" + strconv.Itoa(line)
+			if kind == "function_expression" || kind == "generator_function" {
+				// A named function expression is never the implementation
+				// of a same-named overload signature, and a same-named
+				// declaration replaces it.
+				out.expression(id, name, symKind, line, kind+" "+name)
+			} else {
+				out.symbolBody(id, name, symKind, line, kind+" "+name, node.ChildByFieldName("body") != nil, tsScope(node))
+			}
+			out.content(id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
 			n++
 			// calls within: find call_expression children
 			var findCalls func(n *ts.Node)
@@ -144,7 +181,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 						if idx := strings.LastIndex(callee, "."); idx >= 0 {
 							callee = callee[idx+1:]
 						}
-						db.call(repo, rel, id, name, callee, int(n.StartPosition().Row)+1, int(n.StartPosition().Column)+1, "unresolved")
+						out.call(id, name, callee, int(n.StartPosition().Row)+1, int(n.StartPosition().Column)+1, "unresolved")
 					}
 				}
 				for i := uint(0); i < n.ChildCount(); i++ {
@@ -162,19 +199,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 	// lexical containers, Tree-sitter symbols are never module-level targets,
 	// so these resolve to module files (and decorated Python handlers) only.
 	if lang := relationLanguage(rel); lang != "" {
-		writeLexRelations(lang, repo, rel, newLexSource(lang, string(src)), db, func(int) (string, string) { return "", "" }, nil)
+		writeLexRelations(lang, repo, rel, newLexSource(lang, string(src)), out, func(int) (string, string) { return "", "" }, nil)
 	}
 	return n, nil
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	b := []byte{}
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }

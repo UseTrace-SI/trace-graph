@@ -340,7 +340,7 @@ func PrepareRevisionPair(ctx context.Context, root, base, head string) (*Revisio
 		sum.Write(digest[:])
 	}
 	return &RevisionPair{BaseCommit: baseID, HeadCommit: headID, PolicyHash: fmt.Sprintf("%x", sum.Sum(nil)), root: canonical, base: before, head: after, excluded: func(file string) bool {
-		return excludedSource(strings.ToLower(file)) || ignoreCurrent(file) || before.excluded(file) || after.excluded(file)
+		return excludedSource(file) || ignoreCurrent(file) || before.excluded(file) || after.excluded(file)
 	}}, nil
 }
 
@@ -483,6 +483,7 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 		}
 	}
 	writer := &indexWriter{tx: tx, moduleOverride: &module, maxRecords: 100000, shapes: map[string]symbolShape{}}
+	defer writer.close()
 	for _, entry := range selected.entries {
 		if err := ctx.Err(); err != nil {
 			return stats, err
@@ -505,11 +506,12 @@ func (p *RevisionPair) Analyze(ctx context.Context, side string, db *sql.DB) (Re
 		if err != nil {
 			return stats, err
 		}
-		if _, err := analyzeFile(p.root, entry.file, entry.file, data, writer); err != nil {
+		batch := writer.batch(entry.file)
+		if _, err := analyzeFile(p.root, entry.file, entry.file, data, batch); err != nil {
 			return stats, err
 		}
-		if writer.err != nil {
-			return stats, writer.err
+		if err := writer.flush(p.root, batch); err != nil {
+			return stats, err
 		}
 		stats.Files++
 		stats.SourceBytes += entry.size

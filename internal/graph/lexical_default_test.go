@@ -206,10 +206,7 @@ func TestLexicalAnalysisOfLargeFilesIsLinear(t *testing.T) {
 	if len(decls) != functions || len(calls) != 2*functions {
 		t.Fatalf("%d declarations and %d calls", len(decls), len(calls))
 	}
-	if elapsed > 30*time.Second*raceSlowdown {
-		t.Fatalf("lexical analysis of %d functions took %v", functions, elapsed)
-	}
-	t.Logf("%d functions analyzed in %v", functions, elapsed)
+	checkBudget(t, elapsed, 30*time.Second, fmt.Sprintf("lexical analysis of %d functions", functions))
 }
 
 // A single-component absolute Python module (`from tool import run`, with
@@ -258,9 +255,11 @@ func TestLexicalBodySearchesAreBounded(t *testing.T) {
 		s := newLexSource(tc.lang, tc.src)
 		decls := lexDeclarations(tc.lang, s)
 		lexCalls(tc.lang, s, decls)
-		if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown || len(decls) == 0 {
-			t.Fatalf("%s: %d declarations in %v", tc.lang, len(decls), elapsed)
+		elapsed := time.Since(start)
+		if len(decls) == 0 {
+			t.Fatalf("%s: no declarations", tc.lang)
 		}
+		checkBudget(t, elapsed, 10*time.Second, tc.lang+" analysis")
 	}
 }
 
@@ -320,5 +319,105 @@ func TestRegressionLexicalBindingsNeverGuess(t *testing.T) {
 				expectEdges(t, goEdges(t, db, root, kind), want)
 			}
 		})
+	}
+}
+
+func TestLexicalOverloadTakesImplementationBodyOnItsLine(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		body bool
+	}{
+		{"function f$(a: string): void; function f$(a: any) { g(a) }\n", true},
+		{"export function f(a: string): void; export function f(a: number): void; export function f(a: any) { g(a) }\n", true},
+		{"function fx(): void; function fxy() { g() }\n", false},
+		{"declare function h(): void;\n", false},
+	} {
+		s := newLexSource("typescript", tc.src)
+		decls := lexDeclarations("typescript", s)
+		if len(decls) == 0 {
+			t.Fatalf("%q: no declarations", tc.src)
+		}
+		if got := decls[0].bodyStart >= 0; got != tc.body {
+			t.Errorf("%q: body %v, want %v", tc.src, got, tc.body)
+		}
+	}
+}
+
+func TestLexicalOverloadRejectsNonSiblingCandidates(t *testing.T) {
+	for _, src := range []string{
+		"function h(a: string): void; foo(function h() { wrong() });\n",
+		"function h(a: string): void; (function h() { wrong() })();\n",
+		"function h(a: string): void; function outer() { function h() { wrong() } }\n",
+		"function f(a: string): void; function fé() { wrong() }\n",
+		"function f(a: string): void; x = function f() { wrong() }\n",
+	} {
+		decls := lexDeclarations("typescript", newLexSource("typescript", src))
+		if len(decls) == 0 || decls[0].bodyStart >= 0 {
+			t.Errorf("%q borrowed a body", src)
+		}
+	}
+	decls := lexDeclarations("typescript", newLexSource("typescript", "export function h(a: string): void; foo(function h() {}); export default async function h(a: any) { right(a) }\n"))
+	if len(decls) == 0 || decls[0].bodyStart < 0 {
+		t.Fatal("sibling implementation after export default async not found")
+	}
+}
+
+// A function declared after a statement that ends on its line is a
+// declaration of that line; function expressions, and declarations behind
+// an unclosed or closing bracket, are not.
+func TestLexicalDeclarationAfterStatementOnItsLine(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"foo(function h() { wrong() }); export function h(a: string): void; export function h(a: any) { right(a) }\n", "h"},
+		{"import x from './x'; export function g() { x() }\n", "g"},
+		{"if (a) { b() } async function g() {}\n", "g"},
+		{"foo(function h() { wrong() });\n", ""},
+		{"foo(a, function h() {});\n", ""},
+		{"}); function g() {}\n", ""},
+		{"foo(a; function g() {})\n", ""},
+		{"x = function g() {}; y()\n", ""},
+		{"const el = <p>{count} function calls</p>;\n", ""},
+		{"const li = <li>Use a callback; function components re-render</li>;\n", ""},
+		{"a(); function g<T>(x: T) { return x }\n", "g"},
+		{"a(); function g <T extends Map<string, number>> (x: T) {}\n", "g"},
+	} {
+		decls := lexDeclarations("typescript", newLexSource("typescript", tc.src))
+		var names []string
+		for _, d := range decls {
+			names = append(names, d.name)
+		}
+		if got := strings.Join(names, " "); got != tc.want {
+			t.Errorf("%q declared %q, want %q", tc.src, got, tc.want)
+		}
+	}
+	src := "foo(function h() { wrong() }); export function h(a: string): void; export function h(a: any) { right(a) }\n"
+	decls := lexDeclarations("typescript", newLexSource("typescript", src))
+	if len(decls) != 1 || !decls[0].exported || decls[0].bodyStart < strings.Index(src, "any") || decls[0].bodyStart > strings.Index(src, "right") || decls[0].offset != strings.Index(src, " export") {
+		t.Fatalf("declaration after a statement: %+v", decls)
+	}
+}
+
+// `function` must be followed by whitespace or `*` before the declared name:
+// functionCall() is a call, not a declaration of Call.
+func TestLexicalFunctionKeywordNeedsSeparator(t *testing.T) {
+	for src, want := range map[string]string{
+		"functionCall();\n":             "",
+		"a(); functionCall();\n":        "",
+		"function* gen() {}\n":          "gen",
+		"function*gen() {}\n":           "gen",
+		"async function\tf() {}\n":      "f",
+		"a(); export function g() {}\n": "g",
+	} {
+		var names []string
+		for _, d := range lexDeclarations("javascript", newLexSource("javascript", src)) {
+			names = append(names, d.name)
+		}
+		if got := strings.Join(names, " "); got != want {
+			t.Errorf("%q declared %q, want %q", src, got, want)
+		}
+	}
+	src := "function h(a: string): void; functionh(() => { wrong() }); function h(a: any) { right(a) }\n"
+	decls := lexDeclarations("typescript", newLexSource("typescript", src))
+	if len(decls) != 1 || decls[0].bodyStart < strings.Index(src, "wrong") {
+		t.Fatalf("overload implementation after functionh(): %+v", decls)
 	}
 }

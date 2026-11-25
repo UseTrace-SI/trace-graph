@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -218,5 +219,253 @@ func TestRegressionCochangePairBudgetCountsUniquePairs(t *testing.T) {
 				t.Fatalf("got %v %q, want %q", err, &out, tc.want)
 			}
 		})
+	}
+}
+
+// Configuration files are not indexed, but their co-change history with
+// sources is useful: cochange pairs YAML, JSON, Dockerfiles and the like,
+// while secret paths and lockfiles stay out.
+func TestCochangeIncludesConfigurationFiles(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			"deploy.yaml":       fmt.Sprintf("replicas: %d\n", i),
+			"cfg.yml":           fmt.Sprintf("level: %d\n", i),
+			"m.go":              fmt.Sprintf("package m\nfunc M%d(){}\n", i),
+			"Dockerfile":        fmt.Sprintf("FROM scratch\n# %d\n", i),
+			"package-lock.json": fmt.Sprintf("{\"v\": %d}\n", i),
+			".env.yaml":         fmt.Sprintf("secret: %d\n", i),
+			// Credential files the Trace CLI classifies as secrets, and a
+			// .traceignored config, are never named.
+			"credentials.json":     fmt.Sprintf("{\"k\": %d}\n", i),
+			"service-account.json": fmt.Sprintf("{\"k\": %d}\n", i),
+			"kubeconfig.yaml":      fmt.Sprintf("token: %d\n", i),
+			"ignored.yaml":         fmt.Sprintf("x: %d\n", i),
+			".traceignore":         "ignored.yaml\n",
+		} {
+			if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range pairs {
+		got = append(got, p.A+"+"+p.B)
+	}
+	text := strings.Join(got, " ")
+	for _, want := range []string{"cfg.yml+deploy.yaml", "deploy.yaml+m.go", "Dockerfile+m.go"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %s in %s", want, text)
+		}
+	}
+	for _, never := range []string{"package-lock.json", ".env", "credentials", "service-account", "kubeconfig", "ignored.yaml"} {
+		if strings.Contains(text, never) {
+			t.Fatalf("%s paired: %s", never, text)
+		}
+	}
+}
+
+// With --repo selecting a subdirectory, git log prints paths relative to the
+// working-tree root. The root's .traceignore (and the subdirectory's own)
+// applies, pairs stay inside the subdirectory and paths are shown relative
+// to it.
+func TestCochangeInSubdirectoryHonorsPolicyAndScope(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			".traceignore":     "sub/secret.go\n",
+			"sub/.traceignore": "local.go\n",
+			"sub/a.go":         fmt.Sprintf("package s\nfunc A%d(){}\n", i),
+			"sub/b.go":         fmt.Sprintf("package s\nfunc B%d(){}\n", i),
+			"sub/secret.go":    fmt.Sprintf("package s\nfunc S%d(){}\n", i),
+			"sub/local.go":     fmt.Sprintf("package s\nfunc L%d(){}\n", i),
+			"top.go":           fmt.Sprintf("package t\nfunc T%d(){}\n", i),
+		} {
+			if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, "sub"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "a.go" || pairs[0].B != "b.go" || pairs[0].Count != 2 {
+		t.Fatalf("subdirectory pairs: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range pairs {
+		got = append(got, p.A+"+"+p.B)
+	}
+	if text := strings.Join(got, " "); strings.Contains(text, "secret.go") || !strings.Contains(text, "sub/a.go+sub/b.go") || !strings.Contains(text, "sub/local.go") {
+		t.Fatalf("root pairs: %s", text)
+	}
+}
+
+// diff.relative=true makes git log print paths relative to the current
+// directory, which CochangeScope (expecting working-tree-root paths) then
+// rejected, so a subdirectory --repo returned nothing.
+func TestRegressionCochangeIgnoresDiffRelativeConfig(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	compareTestGit(t, root, "config", "diff.relative", "true")
+	// log.showRoot=false would drop the root commit's files.
+	compareTestGit(t, root, "config", "log.showRoot", "false")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			"sub/a.go": fmt.Sprintf("package s\nfunc A%d(){}\n", i),
+			"sub/b.go": fmt.Sprintf("package s\nfunc B%d(){}\n", i),
+			"top.go":   fmt.Sprintf("package t\nfunc T%d(){}\n", i),
+		} {
+			if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, "sub"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "a.go" || pairs[0].B != "b.go" || pairs[0].Count != 2 {
+		t.Fatalf("subdirectory pairs with diff.relative=true: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 3 {
+		t.Fatalf("root pairs with diff.relative=true: %+v", pairs)
+	}
+}
+
+// Built-in exclusions apply to the path inside the requested scope, as for
+// `analyze --repo vendor/lib`, which indexes that directory: a --repo below
+// vendor/ pairs its files instead of returning nothing. Agent configuration
+// is excluded at the working-tree root and at the scope root, as the Trace
+// CLI excludes it at the root it captures.
+func TestCochangeScopeBelowExcludedDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			"vendor/lib/a.go":               fmt.Sprintf("package lib\nfunc A%d(){}\n", i),
+			"vendor/lib/b.go":               fmt.Sprintf("package lib\nfunc B%d(){}\n", i),
+			"vendor/lib/.mcp.json":          fmt.Sprintf("{\"v\": %d}\n", i),
+			"vendor/lib/node_modules/x.js":  fmt.Sprintf("x(%d)\n", i),
+			"vendor/lib/.env.yaml":          fmt.Sprintf("k: %d\n", i),
+			"app.json":                      fmt.Sprintf("{\"v\": %d}\n", i),
+			"main.go":                       fmt.Sprintf("package main\nfunc M%d(){}\n", i),
+			".mcp.json":                     fmt.Sprintf("{\"v\": %d}\n", i),
+			".claude/settings.local.json":   fmt.Sprintf("{\"v\": %d}\n", i),
+			".cursor/hooks.json":            fmt.Sprintf("{\"v\": %d}\n", i),
+			".gemini/settings.json":         fmt.Sprintf("{\"v\": %d}\n", i),
+			".agents/hooks.json":            fmt.Sprintf("{\"v\": %d}\n", i),
+			".pnp.data.json":                fmt.Sprintf("{\"v\": %d}\n", i),
+			".yarn/releases/yarn-4.5.0.cjs": fmt.Sprintf("y(%d)\n", i),
+		} {
+			path := filepath.Join(root, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, "vendor", "lib"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "a.go" || pairs[0].B != "b.go" || pairs[0].Count != 2 {
+		t.Fatalf("vendor/lib pairs: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "app.json" || pairs[0].B != "main.go" {
+		t.Fatalf("root pairs: %+v", pairs)
+	}
+}
+
+// A scope inside a credential directory pairs nothing: built-in rules apply
+// to the path inside --repo, but credential locations are checked against the
+// whole working-tree path.
+func TestCochangeScopeInsideCredentialDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			".aws/sso/cache/tok.json": fmt.Sprintf("{\"t\": %d}\n", i),
+			".aws/x.py":               fmt.Sprintf("x = %d\n", i),
+			".docker/config.json":     fmt.Sprintf("{\"v\": %d}\n", i),
+			".docker/app.yaml":        fmt.Sprintf("v: %d\n", i),
+			"main.go":                 fmt.Sprintf("package main\nfunc M%d(){}\n", i),
+		} {
+			path := filepath.Join(root, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, ".aws"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 0 {
+		t.Fatalf(".aws scope paired credential paths: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), filepath.Join(root, ".docker"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range pairs {
+		if p.A == "config.json" || p.B == "config.json" {
+			t.Fatalf(".docker scope paired config.json: %+v", pairs)
+		}
 	}
 }

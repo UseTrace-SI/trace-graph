@@ -17,7 +17,7 @@ func TestRegressionNeighborsOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES('s',?,'main.go','Foo','func',42,'func Foo'); INSERT INTO relations VALUES('r',?,'Caller','Foo','call','caller.go',7); INSERT INTO symbols VALUES('other','other-repo','other.go','Foo','func',99,'func Foo'); INSERT INTO relations VALUES('other','other-repo','OtherCaller','Foo','call','other.go',99)", repo, repo); err != nil {
+	if _, err := db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES('s',?,'main.go','Foo','func',42,'func Foo'); INSERT INTO relations VALUES('r',?,'Caller','Foo','call','caller.go',7); INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES('other','other-repo','other.go','Foo','func',99,'func Foo'); INSERT INTO relations VALUES('other','other-repo','OtherCaller','Foo','call','other.go',99)", repo, repo); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

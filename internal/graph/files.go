@@ -9,25 +9,251 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unicode"
 )
 
-// InspectableSource applies the same file policy as indexing. Read-only
-// inspection commands use it so derived context never mentions excluded paths.
-func InspectableSource(rel string) bool {
-	return supportedFile(strings.ToLower(filepath.Ext(rel))) && !excludedSource(strings.ToLower(rel))
+// cochangeConfigExts and cochangeConfigNames are configuration files whose
+// history is worth pairing with sources even though they are not indexed.
+// Lockfiles change with every manifest edit and are left out (other
+// lockfiles, such as *.lock and go.sum, have no allowed extension).
+var (
+	cochangeConfigExts  = wordSetShared(".yaml .yml .json .toml .ini .cfg .conf .properties .xml .gradle .tf .hcl .mk .cmake .bazel .bzl")
+	cochangeConfigNames = wordSetShared("dockerfile containerfile makefile gnumakefile jenkinsfile procfile cmakelists.txt build workspace go.mod")
+	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json pnpm-lock.yaml packages.lock.json conda-lock.yml conda-lock.yaml .terraform.lock.hcl")
+	// Agents' hook and MCP configuration, which the Trace CLI never
+	// captures or restores (internal/manifest protectedFolded). Like the
+	// CLI, these match relative to the root only.
+	agentConfigFiles = wordSetShared(".mcp.json .claude/settings.local.json .cursor/hooks.json .gemini/settings.json .agents/hooks.json")
+)
+
+// agentConfig reports agent configuration the Trace CLI protects, for a
+// path relative to the root it would capture.
+func agentConfig(rel string) bool {
+	return agentConfigFiles[foldPath(filepath.ToSlash(rel))]
 }
 
-func excludedSource(rel string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
-		switch part {
-		case ".git", ".trace", ".trace-brain", ".trace-graph", ".aws", ".ssh", "node_modules", "vendor":
+// CochangeFile reports whether cochange pairs rel: indexable sources and
+// common configuration files (YAML, JSON, TOML, Dockerfiles, Makefiles,
+// Terraform, ...). The secret and generated-state exclusions of indexing
+// and the agent configuration the Trace CLI never captures apply.
+// CochangeFilter also applies the project's .traceignore.
+func CochangeFile(rel string) bool {
+	if excludedSource(rel) || agentConfig(rel) {
+		return false
+	}
+	base := pathBase(foldPath(rel))
+	if cochangeLockfiles[base] {
+		return false
+	}
+	ext := filepath.Ext(base)
+	return supportedFile(ext) || cochangeConfigExts[ext] || cochangeConfigNames[base] || strings.HasPrefix(base, "dockerfile.")
+}
+
+// CochangeFilter returns CochangeFile restricted by the repository's
+// .traceignore, the policy capture and indexing honor.
+func CochangeFilter(root string) (func(string) bool, error) {
+	ignored, err := projectExclusions(root)
+	if err != nil {
+		return nil, err
+	}
+	return func(rel string) bool {
+		return CochangeFile(rel) && !ignored(filepath.ToSlash(rel))
+	}, nil
+}
+
+// CochangeScope maps the paths git log prints for a checkout (relative to
+// the Git working-tree root) to paths relative to repo, which may be a
+// subdirectory, and reports whether cochange pairs them: the path must lie
+// under repo, pass CochangeFile relative to repo, and neither the
+// working-tree root's .traceignore nor, for a subdirectory, repo's own
+// .traceignore (the one indexing reads) may exclude it. Agent configuration
+// at the working-tree root is excluded too.
+//
+// The built-in exclusions apply to the path inside repo, as for indexing:
+// `analyze --repo vendor/lib` indexes that directory although vendor/ is
+// excluded beneath a root, so cochange pairs its files as well.
+func CochangeScope(ctx context.Context, repo string) (func(gitPath string) (string, bool), error) {
+	out, err := revisionOutput(ctx, repo, 8192, "rev-parse", "--show-toplevel", "--show-prefix")
+	if err != nil {
+		return nil, fmt.Errorf("locating the Git working tree: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	top, prefix := lines[0], ""
+	if len(lines) > 1 {
+		prefix = filepath.ToSlash(lines[1])
+	}
+	topIgnored, err := projectExclusions(top)
+	if err != nil {
+		return nil, err
+	}
+	subPolicy := func(string) bool { return false }
+	if prefix != "" {
+		if subPolicy, err = projectExclusions(repo); err != nil {
+			return nil, err
+		}
+	}
+	return func(gitPath string) (string, bool) {
+		rel, under := strings.CutPrefix(gitPath, prefix)
+		if !under || rel == "" || !CochangeFile(rel) || secretLocation(gitPath) || agentConfig(gitPath) || topIgnored(gitPath) || subPolicy(rel) {
+			return "", false
+		}
+		return rel, true
+	}, nil
+}
+
+// secretLocation reports whether a working-tree-relative path lies in a
+// credential directory (.aws, .ssh, .env*, a *.pem or *.key directory, an SSH
+// key name) or is a credential file named by its location (.docker/config.json,
+// .kube/config). Unlike excludedSource it ignores vendor and node_modules, so a
+// --repo scope below vendor/ still pairs its files, while a scope inside a
+// credential directory pairs nothing.
+func secretLocation(gitPath string) bool {
+	p := foldPath(filepath.ToSlash(gitPath))
+	parts := strings.Split(p, "/")
+	for _, part := range parts[:len(parts)-1] {
+		if part == ".aws" || part == ".ssh" || strings.HasPrefix(part, ".env") || strings.HasSuffix(part, ".pem") || strings.HasSuffix(part, ".key") {
 			return true
 		}
-		if strings.HasPrefix(part, ".env") || strings.HasPrefix(part, "id_rsa") || strings.HasSuffix(part, ".pem") || strings.HasSuffix(part, ".key") {
+		for _, key := range sshKeyPrefixes {
+			if strings.HasPrefix(part, key) {
+				return true
+			}
+		}
+	}
+	for _, file := range secretFiles {
+		if p == file || strings.HasSuffix(p, "/"+file) {
 			return true
 		}
 	}
 	return false
+}
+
+func pathBase(slashed string) string {
+	if i := strings.LastIndexByte(slashed, '/'); i >= 0 {
+		return slashed[i+1:]
+	}
+	return slashed
+}
+
+// Credential files, matching the Trace CLI's built-in secret paths
+// (internal/manifest SecretPath). Names and suffixes match a file's own name
+// only, so a directory such as pkg/kubeconfig/ is not excluded.
+var (
+	secretNames = wordSetShared(".npmrc .pypirc .netrc _netrc .git-credentials .pgpass credentials.json kubeconfig kubeconfig.yaml kubeconfig.yml")
+	// Certificate and key stores, Terraform state (it holds resource
+	// secrets) and kubeconfig files.
+	secretSuffixes = []string{".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfstate.backup", ".kubeconfig"}
+	// Files identified by their directory as well as their name.
+	secretFiles = []string{".kube/config", ".docker/config.json"}
+	// Generated dependency resolution: Yarn Plug'n'Play loaders and data.
+	generatedNames = wordSetShared(".pnp.cjs .pnp.loader.mjs .pnp.js .pnp.data.json")
+	// Default OpenSSH key names of every key type, with their .pub files.
+	sshKeyPrefixes = []string{"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
+)
+
+// foldPath normalizes a repository-relative path for policy matching like
+// the Trace CLI (internal/manifest foldPath and SecretPath): backslashes are
+// separators, a leading ./ is dropped, case is folded (case-insensitive file
+// systems resolve .SSH to .ssh) and zero-width and bidirectional control
+// code points, which render invisibly, are removed.
+func foldPath(rel string) string {
+	rel = strings.TrimPrefix(strings.ReplaceAll(rel, "\\", "/"), "./")
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == 0x200c || r == 0x200d || r == 0x200e || r == 0x200f, r >= 0x202a && r <= 0x202e,
+			r >= 0x206a && r <= 0x206f, r == 0xfeff:
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, rel)
+}
+
+// excludedSource reports generated Trace state, dependency trees and secret
+// paths for a repository-relative path in any case or separator form.
+// Indexing, revision comparison and cochange share it, even for tracked
+// files.
+func excludedSource(rel string) bool {
+	rel = foldPath(filepath.ToSlash(rel))
+	for _, part := range strings.Split(rel, "/") {
+		switch part {
+		case ".git", ".trace", ".trace-brain", ".trace-graph", ".aws", ".ssh", "node_modules", "vendor":
+			return true
+		}
+		if strings.HasPrefix(part, ".env") || strings.HasSuffix(part, ".pem") || strings.HasSuffix(part, ".key") {
+			return true
+		}
+		for _, key := range sshKeyPrefixes {
+			if strings.HasPrefix(part, key) {
+				return true
+			}
+		}
+	}
+	base := pathBase(rel)
+	if generatedNames[base] || secretNames[base] || (strings.HasPrefix(base, "service-account") && strings.HasSuffix(base, ".json")) {
+		return true
+	}
+	for _, suffix := range secretSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	for _, file := range secretFiles {
+		if rel == file || strings.HasSuffix(rel, "/"+file) {
+			return true
+		}
+	}
+	// Yarn's vendored releases (.yarn/releases/yarn-4.5.0.cjs) are
+	// third-party bundles.
+	return strings.HasPrefix(rel, ".yarn/releases/") || strings.Contains(rel, "/.yarn/releases/")
+}
+
+// buildManifests mark a directory whose dist/, build/ or target/ child is
+// that tool's output. go.mod is not one: Go packages are often named build
+// or dist (go/build, cmd/dist).
+var buildManifests = []string{"package.json", "Cargo.toml", "pyproject.toml", "setup.py", "setup.cfg", "pom.xml", "build.gradle", "build.gradle.kts"}
+
+// outputFilter reports build output, virtual environments and minified
+// bundles of a directory walked without Git. A Git checkout leaves them to
+// .gitignore, but a directory without Git has no ignore file, so walking it
+// would index generated code. dist/, build/ and target/ are output only
+// beside a build manifest, at the root or deeper; elsewhere directories of
+// those names are often real packages (GOROOT/src/cmd/dist, go/build).
+// .venv/ is skipped anywhere.
+type outputFilter struct {
+	root      string
+	manifests map[string]bool
+}
+
+func (o *outputFilter) excluded(rel string, dir bool) bool {
+	base := strings.ToLower(filepath.Base(rel))
+	if !dir {
+		return strings.HasSuffix(base, ".min.js")
+	}
+	switch base {
+	case ".venv":
+		return true
+	case "dist", "build", "target":
+		return o.hasManifest(filepath.Dir(rel))
+	}
+	return false
+}
+
+func (o *outputFilter) hasManifest(dir string) bool {
+	if found, ok := o.manifests[dir]; ok {
+		return found
+	}
+	found := false
+	for _, name := range buildManifests {
+		if info, err := os.Lstat(filepath.Join(o.root, dir, name)); err == nil && info.Mode().IsRegular() {
+			found = true
+			break
+		}
+	}
+	if o.manifests == nil {
+		o.manifests = map[string]bool{}
+	}
+	o.manifests[dir] = found
+	return found
 }
 
 // sourceVisitor receives a repository-relative path and the source opened
@@ -67,6 +293,7 @@ func walkSourcesContext(ctx context.Context, root string, visit sourceVisitor) e
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
+		output := &outputFilter{root: root}
 		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -78,7 +305,7 @@ func walkSourcesContext(ctx context.Context, root string, visit sourceVisitor) e
 			if err != nil {
 				return err
 			}
-			if rel != "." && (excludedSource(rel) || ignored(rel)) {
+			if rel != "." && (excludedSource(rel) || output.excluded(rel, entry.IsDir()) || ignored(rel)) {
 				if entry.IsDir() {
 					return filepath.SkipDir
 				}

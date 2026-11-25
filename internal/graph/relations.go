@@ -7,45 +7,40 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
 func scopedID(repo, id string) string { return fmt.Sprintf("%x:%s", sha256.Sum256([]byte(repo)), id) }
 
+// ScopedID returns the stored identity of a repository-relative symbol or
+// relation ID: the SHA-256 of the canonical repository path, a colon and the
+// ID. Stored IDs stay unique across repositories sharing one database.
+func ScopedID(repo, id string) string { return scopedID(repo, id) }
+
+// UnscopedID strips the repository hash of a stored ID. Output scoped to one
+// repository shows IDs this way; ScopedID restores them.
+func UnscopedID(id string) string {
+	if len(id) > 65 && id[64] == ':' {
+		for i := 0; i < 64; i++ {
+			if c := id[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+				return id
+			}
+		}
+		return id[65:]
+	}
+	return id
+}
+
 // goSymbolID is the unscoped identity of a declaration at a physical line.
-func goSymbolID(rel, name string, line int) string { return rel + ":" + name + ":" + itoa(line) }
+func goSymbolID(rel, name string, line int) string {
+	return rel + ":" + name + ":" + strconv.Itoa(line)
+}
 
 // goRelationID is the unscoped identity of a call relation.
 func goRelationID(fromID, callee string, line, column int) string {
-	return fromID + "->" + callee + ":" + itoa(line) + ":" + itoa(column)
-}
-
-func (w *indexWriter) call(repo, rel, fromID, fromName, toName string, line, column int, hint string) {
-	if w.err != nil {
-		return
-	}
-	id := goRelationID(fromID, toName, line, column)
-	if _, err := w.Exec("INSERT INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)", id, repo, fromName, toName, "call", rel, line); err != nil {
-		return
-	}
-	_, _ = w.write("INSERT INTO relation_targets(relation_id,from_id,namespace,hint) VALUES(?,?,?,?) ON CONFLICT(relation_id) DO NOTHING", scopedID(repo, id), scopedID(repo, fromID), w.namespace, hint)
-}
-
-// relation writes a relationship other than a Go call. fromID is empty for
-// module-level relationships such as imports.
-func (w *indexWriter) relation(repo, rel, id, fromID, fromName, toName, kind string, line int, hint string) {
-	if w.err != nil {
-		return
-	}
-	if _, err := w.Exec("INSERT INTO relations(id,repo,from_symbol,to_symbol,kind,file,line) VALUES(?,?,?,?,?,?,?)", id, repo, fromName, toName, kind, rel, line); err != nil {
-		return
-	}
-	from := ""
-	if fromID != "" {
-		from = scopedID(repo, fromID)
-	}
-	_, _ = w.write("INSERT INTO relation_targets(relation_id,from_id,namespace,hint) VALUES(?,?,?,?) ON CONFLICT(relation_id) DO NOTHING", scopedID(repo, id), from, w.namespace, hint)
+	return fromID + "->" + callee + ":" + strconv.Itoa(line) + ":" + strconv.Itoa(column)
 }
 
 // Resolve unique package functions and explicitly declared local receiver

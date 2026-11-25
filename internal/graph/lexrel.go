@@ -3,6 +3,7 @@ package graph
 import (
 	pathpkg "path"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -846,7 +847,7 @@ func (s *lexSource) lineText(line int) string {
 // that contains an offset, or returns empty strings at module scope; local
 // (nil when unknown) reports a name bound by a function enclosing an offset.
 // A route handler bound that way is a parameter or local and never resolves.
-func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, enclosing func(int) (string, string), local func(int, string) bool) {
+func writeLexRelations(lang, repo, rel string, s *lexSource, out *fileBatch, enclosing func(int) (string, string), local func(int, string) bool) {
 	if lang == "" {
 		return
 	}
@@ -856,8 +857,8 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, en
 		if to == "" || imp.kind == "default" {
 			to = imp.specifier
 		}
-		id := rel + "#import:" + itoa(line) + ":" + itoa(column) + ":" + imp.kind + ":" + imp.local + ":" + imp.imported
-		db.relation(repo, rel, id, "", rel, to, "import", line, strings.Join([]string{"leximport", lang, imp.specifier, imp.imported, imp.local, imp.kind}, "\x1f"))
+		id := rel + "#import:" + strconv.Itoa(line) + ":" + strconv.Itoa(column) + ":" + imp.kind + ":" + imp.local + ":" + imp.imported
+		out.relation(id, "", rel, to, "import", line, strings.Join([]string{"leximport", lang, imp.specifier, imp.imported, imp.local, imp.kind}, "\x1f"))
 	}
 	for _, route := range extractRoutes(lang, s) {
 		line, column := s.position(route.offset)
@@ -866,8 +867,8 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, en
 		if handler == "" {
 			handler = "(inline)"
 		}
-		id := rel + "#route:" + itoa(line) + ":" + itoa(column) + ":" + route.method
-		hint := strings.Join([]string{"lexroute", route.qualifier, route.handler, itoa(route.decorated)}, "\x1f")
+		id := rel + "#route:" + strconv.Itoa(line) + ":" + strconv.Itoa(column) + ":" + route.method
+		hint := strings.Join([]string{"lexroute", route.qualifier, route.handler, strconv.Itoa(route.decorated)}, "\x1f")
 		if bound := route.qualifier; local != nil && route.decorated == 0 && route.handler != "" {
 			if bound == "" {
 				bound = route.handler
@@ -876,6 +877,6 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, en
 				hint = "lexlocal"
 			}
 		}
-		db.relation(repo, rel, id, fromID, route.method+" "+route.path, handler, "route", line, hint)
+		out.relation(id, fromID, route.method+" "+route.path, handler, "route", line, hint)
 	}
 }

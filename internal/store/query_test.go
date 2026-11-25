@@ -36,7 +36,7 @@ func TestLiteralQueryMatchesFTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.Exec("INSERT INTO symbols VALUES('s','repo','main.go','Alpha','func',1,'func Alpha')"); err != nil {
+	if _, err := db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES('s','repo','main.go','Alpha','func',1,'func Alpha')"); err != nil {
 		t.Fatal(err)
 	}
 	q, err := LiteralQuery("Alpha() AND missing")

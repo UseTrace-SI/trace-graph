@@ -33,7 +33,7 @@ func TestRegressionConcurrentOpenAndWrite(t *testing.T) {
 			defer tx.Rollback()
 			var count int
 			if err = tx.QueryRow("SELECT count(*) FROM symbols").Scan(&count); err == nil {
-				_, err = tx.Exec("INSERT INTO symbols VALUES(?, 'repo', 'main.go', 'Symbol', 'func', 1, '')", fmt.Sprintf("symbol-%d", i))
+				_, err = tx.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?, 'repo', 'main.go', 'Symbol', 'func', 1, '')", fmt.Sprintf("symbol-%d", i))
 			}
 			if err == nil {
 				err = tx.Commit()
@@ -82,7 +82,7 @@ INSERT INTO symbols VALUES('legacy','.','gone.go','Old','func',1,'func Old');`)
 	if err := db.QueryRow("SELECT count(*) FROM symbols").Scan(&n); err != nil || n != 0 {
 		t.Fatalf("unsafe old index retained: %d %v", n, err)
 	}
-	if _, err := db.Exec("INSERT INTO symbols VALUES('new','repo','new.go','New','func',1,'func New')"); err != nil {
+	if _, err := db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES('new','repo','new.go','New','func',1,'func New')"); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

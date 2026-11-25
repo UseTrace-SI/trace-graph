@@ -27,10 +27,12 @@ func TestMaxRecordsBoundsActualRows(t *testing.T) {
 	}
 	const cap = 7
 	w := &indexWriter{tx: tx, maxRecords: cap}
-	if _, err := analyzeFile("repo", "p.go", "p.go", []byte(src), w); err != nil {
+	defer w.close()
+	batch := w.batch("p.go")
+	if _, err := analyzeFile("repo", "p.go", "p.go", []byte(src), batch); err != nil {
 		t.Fatal(err)
 	}
-	if w.err == nil || w.records != cap {
+	if err := w.flush("repo", batch); err == nil || err != w.err || w.records != cap {
 		t.Fatalf("cap not enforced at exactly %d rows: records=%d err=%v", cap, w.records, w.err)
 	}
 	var total int

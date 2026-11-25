@@ -16,8 +16,10 @@ import (
 
 // Inspection must never create or migrate an index. A missing index is an
 // explicit error with an actionable refresh command.
-func readIndex() (*sql.DB, error) {
-	path, err := filepath.Abs(dbPath)
+func readIndex() (*sql.DB, error) { return openReadIndex(dbPath) }
+
+func openReadIndex(file string) (*sql.DB, error) {
+	path, err := filepath.Abs(file)
 	if err != nil {
 		return nil, err
 	}
@@ -56,14 +58,8 @@ func transitiveImpactCmd() *cobra.Command {
 	var depth, limit int
 	var jsonOutput, includeDispatch bool
 	cmd := &cobra.Command{Use: "impact <symbol-or-id>", Short: "Trace resolved callers or callees transitively", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		if direction != "callers" && direction != "callees" && direction != "both" {
-			return fmt.Errorf("direction must be callers, callees or both")
-		}
-		if depth < 1 || depth > 20 || limit < 1 || limit > 1000 {
-			return fmt.Errorf("depth must be 1–20 and limit 1–1000")
-		}
-		if len(args[0]) > 4096 {
-			return fmt.Errorf("symbol selector exceeds 4096 bytes")
+		if err := checkImpactRequest(args[0], direction, depth, limit); err != nil {
+			return err
 		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 2*time.Second)
 		defer cancel()
@@ -72,41 +68,8 @@ func transitiveImpactCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		out, err := impactFor(ctx, db, repoPath, args[0], direction, depth, limit, includeDispatch)
 		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		out := impactReport{Protocol: 1, Repo: repoPath, Direction: direction, Depth: depth, IncludeDispatch: includeDispatch, Nodes: []impactNode{}, Analysis: graph.Capabilities()}
-		if err := tx.QueryRowContext(ctx, "SELECT indexed_at FROM repo_state WHERE repo=?", repoPath).Scan(&out.IndexedAt); err != nil {
-			return fmt.Errorf("index unavailable; run trace-graph refresh: %w", err)
-		}
-		rows, err := tx.QueryContext(ctx, "SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE repo=? AND (name=? OR id=?) ORDER BY file,line,id LIMIT 2", repoPath, args[0], args[0])
-		if err != nil {
-			return err
-		}
-		var roots []codeSymbol
-		for rows.Next() {
-			var s codeSymbol
-			if err := rows.Scan(&s.ID, &s.File, &s.Name, &s.Kind, &s.Line, &s.Signature); err != nil {
-				rows.Close()
-				return err
-			}
-			roots = append(roots, s)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		if len(roots) == 0 {
-			return fmt.Errorf("symbol not found")
-		}
-		if len(roots) > 1 {
-			return fmt.Errorf("ambiguous symbol; use the symbol ID from context")
-		}
-		out.Symbol = roots[0]
-		if err := expandImpact(ctx, tx, &out, repoPath, direction, depth, limit); err != nil {
 			return err
 		}
 		if jsonOutput {
@@ -129,6 +92,70 @@ func transitiveImpactCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit a protocol-1 JSON report")
 	cmd.Flags().BoolVar(&includeDispatch, "include-dispatch", false, "also follow interface dispatch edges to possible implementations")
 	return cmd
+}
+
+func checkImpactRequest(selector, direction string, depth, limit int) error {
+	if direction != "callers" && direction != "callees" && direction != "both" {
+		return fmt.Errorf("direction must be callers, callees or both")
+	}
+	if depth < 1 || depth > 20 || limit < 1 || limit > 1000 {
+		return fmt.Errorf("depth must be 1–20 and limit 1–1000")
+	}
+	if len(selector) > 4096 {
+		return fmt.Errorf("symbol selector exceeds 4096 bytes")
+	}
+	return nil
+}
+
+// impactFor validates an impact request and walks resolved edges from the
+// single symbol named or identified by selector.
+func impactFor(ctx context.Context, db *sql.DB, repo, selector, direction string, depth, limit int, includeDispatch bool) (impactReport, error) {
+	if err := checkImpactRequest(selector, direction, depth, limit); err != nil {
+		return impactReport{}, err
+	}
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return impactReport{}, err
+	}
+	defer tx.Rollback()
+	out := impactReport{Protocol: 1, Repo: repo, Direction: direction, Depth: depth, IncludeDispatch: includeDispatch, Nodes: []impactNode{}, Analysis: graph.Capabilities()}
+	if err := tx.QueryRowContext(ctx, "SELECT indexed_at FROM repo_state WHERE repo=?", repo).Scan(&out.IndexedAt); err != nil {
+		return impactReport{}, fmt.Errorf("index unavailable; run trace-graph refresh: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT id,file,name,kind,line,substr(COALESCE(signature,''),1,2048) FROM symbols WHERE repo=? AND (name=? OR id IN (?,?)) ORDER BY file,line,id LIMIT 2", repo, selector, selector, graph.ScopedID(repo, selector))
+	if err != nil {
+		return impactReport{}, err
+	}
+	var roots []codeSymbol
+	for rows.Next() {
+		var s codeSymbol
+		if err := rows.Scan(&s.ID, &s.File, &s.Name, &s.Kind, &s.Line, &s.Signature); err != nil {
+			rows.Close()
+			return impactReport{}, err
+		}
+		roots = append(roots, s)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return impactReport{}, err
+	}
+	if len(roots) == 0 {
+		return impactReport{}, fmt.Errorf("symbol not found")
+	}
+	if len(roots) > 1 {
+		return impactReport{}, fmt.Errorf("ambiguous symbol; use the symbol ID from context")
+	}
+	out.Symbol = roots[0]
+	if err := expandImpact(ctx, tx, &out, repo, direction, depth, limit); err != nil {
+		return impactReport{}, err
+	}
+	// The walk follows stored IDs; the report shows them unscoped.
+	out.Symbol.ID = graph.UnscopedID(out.Symbol.ID)
+	for i := range out.Nodes {
+		out.Nodes[i].ID, out.Nodes[i].Via = graph.UnscopedID(out.Nodes[i].ID), graph.UnscopedID(out.Nodes[i].Via)
+	}
+	return out, nil
 }
 
 // expandImpact walks resolved edges breadth-first from out.Symbol. When ctx
@@ -253,6 +280,20 @@ func healthCmd() *cobra.Command {
 			return err
 		}
 		report := map[string]any{"protocol": 1, "repo": repoPath, "indexed_at": indexed, "files": files, "symbols": symbols, "calls": calls, "resolved_calls": resolved, "unresolved_calls": calls - resolved, "call_resolution": byResolution, "relations": byKind, "analysis": graph.Capabilities()}
+		// Sources whose analysis was incomplete, such as files with
+		// colliding declaration identities.
+		warnings, err := graph.FileWarnings(ctx, db, repoPath, 20)
+		if err != nil {
+			return err
+		}
+		var warned int
+		if len(warnings) > 0 {
+			if err := db.QueryRowContext(ctx, "SELECT count(*) FROM file_warnings WHERE repo=?", repoPath).Scan(&warned); err != nil {
+				return err
+			}
+		}
+		report["files_with_warnings"] = warned
+		report["file_warnings"] = warnings
 		// Indexes written before package-wide type checking have no pass record.
 		var detail string
 		if err := db.QueryRowContext(ctx, "SELECT detail FROM repo_resolution WHERE repo=?", repoPath).Scan(&detail); err == nil {

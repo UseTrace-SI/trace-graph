@@ -2,5 +2,5 @@
 
 package graph
 
-// raceSlowdown scales wall-clock budgets in timing tests; see race_on_test.go.
-const raceSlowdown = 1
+// raceEnabled reports a race-detector build; see checkBudget.
+const raceEnabled = false

@@ -145,9 +145,7 @@ func TestRegressionSymbolRenamesCompareEachPairOnce(t *testing.T) {
 	if _, _, checked := SymbolRenames(base, head, removed, added); !checked {
 		t.Fatal("similarity skipped below the comparison bound")
 	}
-	if elapsed := time.Since(start); elapsed > 10*time.Second*raceSlowdown {
-		t.Fatalf("4000 x 1 candidates took %v", elapsed)
-	}
+	checkBudget(t, time.Since(start), 10*time.Second, "4000 x 1 candidates")
 }
 
 // A symbol moved unchanged to another file keeps its name; it used to be
