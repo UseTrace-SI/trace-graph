@@ -234,7 +234,7 @@ func TestCochangeFileExcludesSecretPaths(t *testing.T) {
 			t.Errorf("ordinary path not paired: %s", rel)
 		}
 	}
-	for _, rel := range []string{"infra/prod.tfvars", "package-lock.json", "web/pnpm-lock.yaml", "src/packages.lock.json", "conda-lock.yml", "yarn.lock", "go.sum"} {
+	for _, rel := range []string{"infra/prod.tfvars", "package-lock.json", "web/pnpm-lock.yaml", "src/packages.lock.json", "conda-lock.yml", "yarn.lock", "go.sum", "infra/.terraform.lock.hcl", ".pnp.cjs", ".pnp.loader.mjs"} {
 		if CochangeFile(rel) {
 			t.Errorf("tfvars or lockfile paired: %s", rel)
 		}
@@ -270,7 +270,12 @@ func TestExcludedSourceFoldsPaths(t *testing.T) {
 			t.Errorf("not excluded: %q", rel)
 		}
 	}
-	for _, rel := range []string{"ssh/helper.go", "pkg/keys/x.go", "envoy/x.go", "cmd/main.go"} {
+	for _, rel := range []string{".pnp.cjs", "web/.pnp.loader.mjs"} {
+		if !excludedSource(rel) {
+			t.Errorf("Plug'n'Play loader not excluded: %q", rel)
+		}
+	}
+	for _, rel := range []string{"ssh/helper.go", "pkg/keys/x.go", "envoy/x.go", "cmd/main.go", "src/pnp.cjs"} {
 		if excludedSource(rel) {
 			t.Errorf("excluded: %q", rel)
 		}

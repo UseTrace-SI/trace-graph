@@ -19,7 +19,7 @@ import (
 var (
 	cochangeConfigExts  = wordSetShared(".yaml .yml .json .toml .ini .cfg .conf .properties .xml .gradle .tf .hcl .mk .cmake .bazel .bzl")
 	cochangeConfigNames = wordSetShared("dockerfile containerfile makefile gnumakefile jenkinsfile procfile cmakelists.txt build workspace go.mod")
-	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json pnpm-lock.yaml packages.lock.json conda-lock.yml conda-lock.yaml")
+	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json pnpm-lock.yaml packages.lock.json conda-lock.yml conda-lock.yaml .terraform.lock.hcl")
 )
 
 // CochangeFile reports whether cochange pairs rel: indexable sources and
@@ -102,6 +102,8 @@ var (
 	secretSuffixes = []string{".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfstate.backup", ".kubeconfig"}
 	// Files identified by their directory as well as their name.
 	secretFiles = []string{".kube/config", ".docker/config.json"}
+	// Generated dependency resolution: Yarn Plug'n'Play loaders.
+	generatedNames = wordSetShared(".pnp.cjs .pnp.loader.mjs .pnp.js")
 	// Default OpenSSH key names of every key type, with their .pub files.
 	sshKeyPrefixes = []string{"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 )
@@ -144,7 +146,7 @@ func excludedSource(rel string) bool {
 		}
 	}
 	base := pathBase(rel)
-	if secretNames[base] || (strings.HasPrefix(base, "service-account") && strings.HasSuffix(base, ".json")) {
+	if generatedNames[base] || secretNames[base] || (strings.HasPrefix(base, "service-account") && strings.HasSuffix(base, ".json")) {
 		return true
 	}
 	for _, suffix := range secretSuffixes {
