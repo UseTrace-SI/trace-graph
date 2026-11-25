@@ -84,4 +84,18 @@ func TestRegressionIgnoredGoFileChangesTypedResolution(t *testing.T) {
 	if got, want := refresh(), fresh(); got != "typed" || got != want {
 		t.Fatalf("ignored file removed: incremental %q, fresh %q", got, want)
 	}
+
+	// A binary that does not record the directory fingerprint resolved
+	// while the directory looked different (here: while the ignored file
+	// existed) and overwrote the pass record. The next refresh cannot trust
+	// that pass, even though nothing changed since.
+	if _, err := db.Exec("UPDATE relation_targets SET to_id=NULL,resolution='unresolved' WHERE relation_id IN (SELECT id FROM relations WHERE repo=? AND to_symbol='M')", root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE repo_resolution SET detail='{"status":"complete"}' WHERE repo=?`, root); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := refresh(), fresh(); got != "typed" || got != want {
+		t.Fatalf("pass written by another binary was trusted: incremental %q, fresh %q", got, want)
+	}
 }

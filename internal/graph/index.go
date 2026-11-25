@@ -327,7 +327,10 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 		if err := resolveRepository(ctx, tx, root, goSources, goOverBudget); err != nil {
 			return Report{}, err
 		}
-		if _, err := tx.ExecContext(ctx, "INSERT INTO repo_go_dirs(repo,digest) VALUES(?,?) ON CONFLICT(repo) DO UPDATE SET digest=excluded.digest", root, dirDigest); err != nil {
+		// The fingerprint lives inside the pass record, so a resolution
+		// written by a binary that does not record it (and may have seen
+		// other directory contents) forces the next pass.
+		if _, err := tx.ExecContext(ctx, "UPDATE repo_resolution SET detail=json_set(detail,'$.go_dirs_digest',?) WHERE repo=?", dirDigest, root); err != nil {
 			return Report{}, err
 		}
 	}
@@ -391,19 +394,15 @@ func resolutionNeeded(ctx context.Context, tx *sql.Tx, root string, changed bool
 		return true, nil
 	}
 	var complete int
-	err := tx.QueryRowContext(ctx, "SELECT complete FROM repo_resolution WHERE repo=?", root).Scan(&complete)
+	var previous sql.NullString
+	err := tx.QueryRowContext(ctx, "SELECT complete,json_extract(detail,'$.go_dirs_digest') FROM repo_resolution WHERE repo=?", root).Scan(&complete, &previous)
 	if err == sql.ErrNoRows {
 		return true, nil
 	}
-	if err != nil || complete != 1 {
+	if err != nil {
 		return true, err
 	}
-	var previous string
-	err = tx.QueryRowContext(ctx, "SELECT digest FROM repo_go_dirs WHERE repo=?", root).Scan(&previous)
-	if err == sql.ErrNoRows {
-		return true, nil
-	}
-	return previous != dirDigest, err
+	return complete != 1 || !previous.Valid || previous.String != dirDigest, nil
 }
 
 // goDirectoryDigest fingerprints the Go file entries (name and type) of the

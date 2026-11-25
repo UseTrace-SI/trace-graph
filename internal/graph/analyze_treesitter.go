@@ -50,7 +50,7 @@ var tsLangs = func() map[string]*ts.Language {
 	}
 }()
 
-const analyzerVersion = "treesitter-v5"
+const analyzerVersion = "treesitter-v6"
 
 func supportedFile(ext string) bool { _, ok := tsLangs[ext]; return ok }
 
