@@ -34,7 +34,7 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 - `trace-graph def <name>` — show definitions and signatures for a symbol name.
 - `trace-graph cochange [--max-count 200] [--max-pairs 100000] [--max-log-bytes 8388608]` — list source-file pairs that change together, from a bounded `git log` stream.
 - `trace-graph capabilities` — JSON description of the compiled analyzer.
-- `trace-graph context [--path FILE] [--query words] [--limit 20] [--semantic]` — bounded, read-only protocol-1 JSON; `--query` is applied as FTS MATCH even with `--path`, and `--semantic` ranks a bounded candidate set by local embeddings.
+- `trace-graph context [--path FILE] [--query words] [--limit 20] [--semantic]` — bounded, read-only protocol-1 JSON; `--query` uses the ranked `query` search even with `--path`, and `--semantic` reranks a bounded candidate set (the 500 best search matches plus up to 500 symbols in files whose path contains a query word, within `--path` when given) by local embeddings.
 - `trace-graph refresh [--repo .]` — index and return protocol-1 JSON.
 
 All analysis and inspection commands remain repository-scoped. `cochange` uses
@@ -71,7 +71,7 @@ Tree-sitter vet, race tests, and 100-run regressions are also included.
 
 ## Production bounds
 
-Ordinary search text is interpreted as literal words, including punctuation; FTS operators are never interpreted. Identifiers are split at camelCase, snake_case and letter/digit boundaries (`HTTPServer` → `HTTP Server`, `utf8Decode` → `utf 8 Decode`) when a symbol is written. Index schema 4 adds these words to an existing index in place on the next `analyze`/`refresh`; until then read-only lookups fall back to name prefixes. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. Local embeddings are hashed word projections rather than a learned semantic model.
+Ordinary search text is interpreted as literal words, including punctuation; FTS operators are never interpreted. Identifiers are split at camelCase, snake_case and letter/digit boundaries (`HTTPServer` → `HTTP Server`, `utf8Decode` → `utf 8 Decode`) when a symbol is written. Index schema 4 adds these words to an existing index in place on the next `analyze`/`refresh`; until then read-only lookups fall back to name prefixes. Context queries have a two-second deadline; semantic ranking scores at most 1,000 candidates. Local embeddings are hashed word projections of a symbol's split name, signature and file path rather than a learned semantic model. Index schema 5 drops older vectors, which the next `analyze`/`refresh` recomputes.
 
 Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused. Per-file relation deletes use a `(repo, file)` index, so a cold index grows with the repository rather than with files × relations.
 

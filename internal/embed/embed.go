@@ -6,18 +6,38 @@ import (
 	"math"
 	"strings"
 	"unicode"
+
+	"github.com/UseTrace-SI/trace-graph/internal/ident"
 )
 
 const Dim = 128
 
+// SymbolText is the text embedded for a symbol: its name, signature and
+// repository-relative file path. Embed splits the identifiers in it.
+func SymbolText(file, name, signature string) string {
+	return name + " " + signature + " " + file
+}
+
+// Embed projects the words of text into a normalized hashed bag of words.
+// Identifiers count as their split words (AnalyzeRepo: analyze, repo) and,
+// when they split, also as the whole lowercased identifier.
 func Embed(text string) []float32 {
 	v := make([]float32, Dim)
-	for _, f := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+	add := func(word string) {
+		h := fnv.New32a()
+		h.Write([]byte(strings.ToLower(word)))
+		v[int(h.Sum32())%Dim] += 1
+	}
+	for _, f := range strings.FieldsFunc(text, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 	}) {
-		h := fnv.New32a()
-		h.Write([]byte(f))
-		v[int(h.Sum32())%Dim] += 1
+		parts := ident.Split(f)
+		if len(parts) > 1 {
+			add(f)
+		}
+		for _, part := range parts {
+			add(part)
+		}
 	}
 	var norm float64
 	for _, x := range v {

@@ -8,9 +8,9 @@ import (
 	"github.com/UseTrace-SI/trace-graph/internal/ident"
 )
 
-// queryWords extracts at most sixteen literal words (letters, digits and
+// QueryWords extracts at most sixteen literal words (letters, digits and
 // underscores) from task text.
-func queryWords(text string) ([]string, error) {
+func QueryWords(text string) ([]string, error) {
 	if len(text) > 4096 {
 		return nil, fmt.Errorf("query exceeds 4096 bytes")
 	}
@@ -23,7 +23,7 @@ func queryWords(text string) ([]string, error) {
 
 // LiteralQuery treats task text as words rather than FTS operators.
 func LiteralQuery(text string) (string, error) {
-	words, err := queryWords(text)
+	words, err := QueryWords(text)
 	if err != nil {
 		return "", err
 	}
@@ -58,7 +58,7 @@ type SymbolSearch struct {
 // user_version: indexes older than schema 4 have no split words and fall back
 // to name and signature prefixes. ok is false when text has no words.
 func NewSymbolSearch(text string, schema int) (search SymbolSearch, ok bool, err error) {
-	words, err := queryWords(text)
+	words, err := QueryWords(text)
 	if err != nil {
 		return SymbolSearch{}, false, err
 	}

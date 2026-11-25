@@ -187,29 +187,36 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	if err := resolveRepository(ctx, tx, root, analyzed > 0 || len(deleted) > 0, goSources, goOverBudget); err != nil {
 		return 0, err
 	}
-	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
+	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.file,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
 	if err != nil {
 		return 0, err
 	}
 	type sym struct{ id, text string }
 	var syms []sym
 	for symRows.Next() {
-		var id, name, sig string
-		if err := symRows.Scan(&id, &name, &sig); err != nil {
+		var id, file, name, sig string
+		if err := symRows.Scan(&id, &file, &name, &sig); err != nil {
 			symRows.Close()
 			return 0, err
 		}
-		syms = append(syms, sym{id: id, text: name + " " + sig})
+		syms = append(syms, sym{id: id, text: embed.SymbolText(file, name, sig)})
 	}
 	symRows.Close()
 	if err := symRows.Err(); err != nil {
 		return 0, err
 	}
-	for _, s := range syms {
-		if _, err := tx.Exec("INSERT OR REPLACE INTO symbol_embeddings(symbol_id,dim,vector) VALUES(?,?,?)",
-			s.id, embed.Dim, embed.Encode(embed.Embed(s.text))); err != nil {
+	if len(syms) > 0 {
+		insert, err := tx.PrepareContext(ctx, "INSERT OR REPLACE INTO symbol_embeddings(symbol_id,dim,vector) VALUES(?,?,?)")
+		if err != nil {
 			return 0, err
 		}
+		for _, s := range syms {
+			if _, err := insert.Exec(s.id, embed.Dim, embed.Encode(embed.Embed(s.text))); err != nil {
+				insert.Close()
+				return 0, err
+			}
+		}
+		insert.Close()
 	}
 	if _, err := tx.Exec("INSERT INTO repo_state(repo,indexed_at) VALUES(?,?) ON CONFLICT(repo) DO UPDATE SET indexed_at=excluded.indexed_at", root, time.Now().UnixMilli()); err != nil {
 		return 0, err

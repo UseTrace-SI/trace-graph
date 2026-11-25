@@ -112,6 +112,14 @@ CREATE TABLE IF NOT EXISTS repo_resolution(repo TEXT PRIMARY KEY,complete INTEGE
 			return fmt.Errorf("cleaning obsolete embeddings: %w", err)
 		}
 	}
+	if version >= 1 && version < 5 {
+		// Schema 5 embeds split identifiers and the file path. Derived
+		// vectors are recomputed by the next analysis, which embeds every
+		// symbol without one.
+		if _, err := tx.Exec("DELETE FROM symbol_embeddings"); err != nil {
+			return fmt.Errorf("clearing outdated embeddings: %w", err)
+		}
+	}
 	if version < SchemaVersion {
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion)); err != nil {
 			return err
@@ -122,7 +130,7 @@ CREATE TABLE IF NOT EXISTS repo_resolution(repo TEXT PRIMARY KEY,complete INTEGE
 
 // SchemaVersion is the user_version of a fully migrated index. Read-only
 // commands never migrate, so they check it before using newer columns.
-const SchemaVersion = 4
+const SchemaVersion = 5
 
 // searchSchema indexes each symbol's name, its split identifier words
 // (terms) and its signature. Terms are computed in Go when a symbol is

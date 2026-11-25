@@ -179,3 +179,26 @@ func sortedCopy(s []string) []string {
 	}
 	return out
 }
+
+// Schema 5 embeds split identifiers and file paths, so vectors written by
+// an older analyzer are dropped and recomputed by the next analysis.
+func TestEmbeddingSchemaUpgradeClearsOutdatedVectors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "g.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature,terms) VALUES('s','repo','f.go','A','func',1,'func A()','A'); INSERT INTO symbol_embeddings(symbol_id,dim,vector) VALUES('s',1,x'00000000'); PRAGMA user_version=4"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	db, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var vectors, symbols int
+	if err := db.QueryRow("SELECT (SELECT count(*) FROM symbol_embeddings),(SELECT count(*) FROM symbols)").Scan(&vectors, &symbols); err != nil || vectors != 0 || symbols != 1 {
+		t.Fatalf("vectors=%d symbols=%d %v", vectors, symbols, err)
+	}
+}

@@ -8,11 +8,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
-	"github.com/UseTrace-SI/trace-graph/internal/embed"
 	"github.com/UseTrace-SI/trace-graph/internal/graph"
 	"github.com/spf13/cobra"
 )
@@ -114,69 +112,11 @@ func contextCmd() *cobra.Command {
 			limit = 20
 		}
 		if semantic && strings.TrimSpace(query) != "" {
-			// Bound the SQL scan so a large index cannot require decoding every
-			// embedding under the same deadline. Results are best-effort when
-			// the deadline expires mid-scan.
-			const semanticScanCap = 2000
-			q := `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048),e.vector FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=?`
-			args := []any{repoPath}
-			if path != "" {
-				q += ` AND s.file=?`
-				args = append(args, path)
+			symbols, err := semanticSymbols(cmd.Context(), db, repoPath, query, path, limit)
+			if err != nil {
+				return err
 			}
-			q += ` ORDER BY s.file,s.line,s.id LIMIT ?`
-			args = append(args, semanticScanCap)
-			type scored struct {
-				item  codeSymbol
-				score float64
-			}
-			qv := embed.Embed(query)
-			var cands []scored
-			if cmd.Context().Err() == nil {
-				rows, err := db.QueryContext(cmd.Context(), q, args...)
-				if err != nil {
-					return err
-				}
-				for rows.Next() {
-					if cmd.Context().Err() != nil {
-						break
-					}
-					var item codeSymbol
-					var vec []byte
-					if err := rows.Scan(&item.ID, &item.File, &item.Name, &item.Kind, &item.Line, &item.Signature, &vec); err != nil {
-						rows.Close()
-						return err
-					}
-					score := 0.0
-					if v := embed.Decode(vec, embed.Dim); v != nil {
-						score = embed.Cosine(qv, v)
-					}
-					if score <= 0 {
-						continue
-					}
-					position := sort.Search(len(cands), func(i int) bool { return cands[i].score < score })
-					if position < limit {
-						cands = append(cands, scored{})
-						copy(cands[position+1:], cands[position:])
-						cands[position] = scored{item: item, score: score}
-						if len(cands) > limit {
-							cands = cands[:limit]
-						}
-					}
-				}
-				rows.Close()
-				if cmd.Context().Err() == nil {
-					if err := rows.Err(); err != nil {
-						return err
-					}
-				}
-			}
-			if limit > len(cands) {
-				limit = len(cands)
-			}
-			for i := 0; i < limit; i++ {
-				out.Symbols = append(out.Symbols, cands[i].item)
-			}
+			out.Symbols = append(out.Symbols, symbols...)
 		} else {
 			// FTS and path filters are applied together; a supplied --path
 			// must not silently discard --query.
