@@ -366,3 +366,58 @@ func TestRegressionCochangeIgnoresDiffRelativeConfig(t *testing.T) {
 		t.Fatalf("root pairs with diff.relative=true: %+v", pairs)
 	}
 }
+
+// Built-in exclusions apply to the path inside the requested scope, as for
+// `analyze --repo vendor/lib`, which indexes that directory: a --repo below
+// vendor/ pairs its files instead of returning nothing. Agent configuration
+// is excluded at the working-tree root and at the scope root, as the Trace
+// CLI excludes it at the root it captures.
+func TestCochangeScopeBelowExcludedDirectory(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			"vendor/lib/a.go":               fmt.Sprintf("package lib\nfunc A%d(){}\n", i),
+			"vendor/lib/b.go":               fmt.Sprintf("package lib\nfunc B%d(){}\n", i),
+			"vendor/lib/.mcp.json":          fmt.Sprintf("{\"v\": %d}\n", i),
+			"vendor/lib/node_modules/x.js":  fmt.Sprintf("x(%d)\n", i),
+			"vendor/lib/.env.yaml":          fmt.Sprintf("k: %d\n", i),
+			"app.json":                      fmt.Sprintf("{\"v\": %d}\n", i),
+			"main.go":                       fmt.Sprintf("package main\nfunc M%d(){}\n", i),
+			".mcp.json":                     fmt.Sprintf("{\"v\": %d}\n", i),
+			".claude/settings.local.json":   fmt.Sprintf("{\"v\": %d}\n", i),
+			".cursor/hooks.json":            fmt.Sprintf("{\"v\": %d}\n", i),
+			".gemini/settings.json":         fmt.Sprintf("{\"v\": %d}\n", i),
+			".agents/hooks.json":            fmt.Sprintf("{\"v\": %d}\n", i),
+			".pnp.data.json":                fmt.Sprintf("{\"v\": %d}\n", i),
+			".yarn/releases/yarn-4.5.0.cjs": fmt.Sprintf("y(%d)\n", i),
+		} {
+			path := filepath.Join(root, name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, "vendor", "lib"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "a.go" || pairs[0].B != "b.go" || pairs[0].Count != 2 {
+		t.Fatalf("vendor/lib pairs: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "app.json" || pairs[0].B != "main.go" {
+		t.Fatalf("root pairs: %+v", pairs)
+	}
+}

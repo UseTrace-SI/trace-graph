@@ -241,6 +241,35 @@ func TestCochangeFileExcludesSecretPaths(t *testing.T) {
 	}
 }
 
+// Agents' hook and MCP configuration, which the Trace CLI never captures
+// (internal/manifest protectedFolded), is matched at the root like the CLI
+// does; Yarn's Plug'n'Play data and vendored releases are generated or
+// third-party and never paired or indexed.
+func TestCochangeFileExcludesAgentConfigAndYarnState(t *testing.T) {
+	for _, rel := range []string{
+		".mcp.json", ".MCP.json", ".claude/settings.local.json", ".Claude/settings.local.json", ".cursor/hooks.json",
+		".CURSOR/hooks.json", ".gemini/settings.json", ".agents/hooks.json", `.claude\settings.local.json`, "./.mcp.json",
+		".pnp.data.json", "web/.pnp.data.json", ".yarn/releases/yarn-4.5.0.cjs", "web/.Yarn/Releases/yarn-3.6.4.cjs",
+	} {
+		if CochangeFile(rel) {
+			t.Errorf("paired: %s", rel)
+		}
+	}
+	for _, rel := range []string{".pnp.data.json", ".yarn/releases/yarn-4.5.0.cjs", "web/.yarn/releases/yarn.js"} {
+		if !excludedSource(rel) {
+			t.Errorf("not excluded from indexing: %s", rel)
+		}
+	}
+	for _, rel := range []string{
+		"pkg/.mcp.json", "mcp.json", ".claude/settings.json", ".cursor/rules.json", "docs/.gemini/settings.json",
+		".yarn/plugins.json", "releases/notes.yaml", "src/yarn/releases.ts", "web/pnp.data.json",
+	} {
+		if !CochangeFile(rel) {
+			t.Errorf("not paired: %s", rel)
+		}
+	}
+}
+
 func TestCochangeFilterHonorsTraceignore(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".traceignore"), []byte("private/\n*.secret.yaml\n"), 0600); err != nil {

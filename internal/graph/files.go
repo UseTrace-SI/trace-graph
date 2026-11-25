@@ -20,14 +20,25 @@ var (
 	cochangeConfigExts  = wordSetShared(".yaml .yml .json .toml .ini .cfg .conf .properties .xml .gradle .tf .hcl .mk .cmake .bazel .bzl")
 	cochangeConfigNames = wordSetShared("dockerfile containerfile makefile gnumakefile jenkinsfile procfile cmakelists.txt build workspace go.mod")
 	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json pnpm-lock.yaml packages.lock.json conda-lock.yml conda-lock.yaml .terraform.lock.hcl")
+	// Agents' hook and MCP configuration, which the Trace CLI never
+	// captures or restores (internal/manifest protectedFolded). Like the
+	// CLI, these match relative to the root only.
+	agentConfigFiles = wordSetShared(".mcp.json .claude/settings.local.json .cursor/hooks.json .gemini/settings.json .agents/hooks.json")
 )
+
+// agentConfig reports agent configuration the Trace CLI protects, for a
+// path relative to the root it would capture.
+func agentConfig(rel string) bool {
+	return agentConfigFiles[foldPath(filepath.ToSlash(rel))]
+}
 
 // CochangeFile reports whether cochange pairs rel: indexable sources and
 // common configuration files (YAML, JSON, TOML, Dockerfiles, Makefiles,
 // Terraform, ...). The secret and generated-state exclusions of indexing
-// apply. CochangeFilter also applies the project's .traceignore.
+// and the agent configuration the Trace CLI never captures apply.
+// CochangeFilter also applies the project's .traceignore.
 func CochangeFile(rel string) bool {
-	if excludedSource(rel) {
+	if excludedSource(rel) || agentConfig(rel) {
 		return false
 	}
 	base := pathBase(foldPath(rel))
@@ -53,9 +64,14 @@ func CochangeFilter(root string) (func(string) bool, error) {
 // CochangeScope maps the paths git log prints for a checkout (relative to
 // the Git working-tree root) to paths relative to repo, which may be a
 // subdirectory, and reports whether cochange pairs them: the path must lie
-// under repo, pass CochangeFile and neither the working-tree root's
-// .traceignore nor, for a subdirectory, repo's own .traceignore (the one
-// indexing reads) may exclude it.
+// under repo, pass CochangeFile relative to repo, and neither the
+// working-tree root's .traceignore nor, for a subdirectory, repo's own
+// .traceignore (the one indexing reads) may exclude it. Agent configuration
+// at the working-tree root is excluded too.
+//
+// The built-in exclusions apply to the path inside repo, as for indexing:
+// `analyze --repo vendor/lib` indexes that directory although vendor/ is
+// excluded beneath a root, so cochange pairs its files as well.
 func CochangeScope(ctx context.Context, repo string) (func(gitPath string) (string, bool), error) {
 	out, err := revisionOutput(ctx, repo, 8192, "rev-parse", "--show-toplevel", "--show-prefix")
 	if err != nil {
@@ -66,7 +82,7 @@ func CochangeScope(ctx context.Context, repo string) (func(gitPath string) (stri
 	if len(lines) > 1 {
 		prefix = filepath.ToSlash(lines[1])
 	}
-	topPolicy, err := CochangeFilter(top)
+	topIgnored, err := projectExclusions(top)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +94,7 @@ func CochangeScope(ctx context.Context, repo string) (func(gitPath string) (stri
 	}
 	return func(gitPath string) (string, bool) {
 		rel, under := strings.CutPrefix(gitPath, prefix)
-		if !under || rel == "" || !topPolicy(gitPath) || subPolicy(rel) {
+		if !under || rel == "" || !CochangeFile(rel) || agentConfig(gitPath) || topIgnored(gitPath) || subPolicy(rel) {
 			return "", false
 		}
 		return rel, true
@@ -102,8 +118,8 @@ var (
 	secretSuffixes = []string{".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfstate.backup", ".kubeconfig"}
 	// Files identified by their directory as well as their name.
 	secretFiles = []string{".kube/config", ".docker/config.json"}
-	// Generated dependency resolution: Yarn Plug'n'Play loaders.
-	generatedNames = wordSetShared(".pnp.cjs .pnp.loader.mjs .pnp.js")
+	// Generated dependency resolution: Yarn Plug'n'Play loaders and data.
+	generatedNames = wordSetShared(".pnp.cjs .pnp.loader.mjs .pnp.js .pnp.data.json")
 	// Default OpenSSH key names of every key type, with their .pub files.
 	sshKeyPrefixes = []string{"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 )
@@ -159,7 +175,9 @@ func excludedSource(rel string) bool {
 			return true
 		}
 	}
-	return false
+	// Yarn's vendored releases (.yarn/releases/yarn-4.5.0.cjs) are
+	// third-party bundles.
+	return strings.HasPrefix(rel, ".yarn/releases/") || strings.Contains(rel, "/.yarn/releases/")
 }
 
 // buildManifests mark a directory whose dist/, build/ or target/ child is
