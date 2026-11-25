@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -191,6 +192,8 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 	// skipped by their stat key are read only if the pass runs.
 	var goSources []goSource
 	goBytes, goOverBudget := 0, false
+	// Directories holding type-checked sources; see goDirectoryDigest.
+	goDirs := map[string]bool{}
 	// Sources are hashed and parsed by a bounded worker pool. Their batches
 	// are stored here, by this goroutine alone, in walk order, so a
 	// generation is identical to a sequential one.
@@ -278,6 +281,7 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 		}
 		job.typeChecked = goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go")
 		if job.typeChecked {
+			goDirs[pathpkg.Dir(rel)] = true
 			if goBytes += int(size); goBytes > goTypeSourceBudget {
 				goOverBudget, goSources = true, nil
 			}
@@ -305,7 +309,11 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 			return Report{}, err
 		}
 	}
-	resolve, err := resolutionNeeded(ctx, tx, root, analyzed > 0 || len(deleted) > 0)
+	dirDigest, err := goDirectoryDigest(root, goDirs)
+	if err != nil {
+		return Report{}, err
+	}
+	resolve, err := resolutionNeeded(ctx, tx, root, analyzed > 0 || len(deleted) > 0, dirDigest)
 	if err != nil {
 		return Report{}, err
 	}
@@ -314,6 +322,9 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 			return Report{}, fmt.Errorf("reading Go sources: %w", err)
 		}
 		if err := resolveRepository(ctx, tx, root, goSources, goOverBudget); err != nil {
+			return Report{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO repo_go_dirs(repo,digest) VALUES(?,?) ON CONFLICT(repo) DO UPDATE SET digest=excluded.digest", root, dirDigest); err != nil {
 			return Report{}, err
 		}
 	}
@@ -365,8 +376,9 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 
 // resolutionNeeded reports whether relation targets must be recomputed.
 // With no changed or deleted file, a complete previous pass is still exact,
-// so an unchanged refresh skips the work.
-func resolutionNeeded(ctx context.Context, tx *sql.Tx, root string, changed bool) (bool, error) {
+// so an unchanged refresh skips the work, unless the Go files beside the
+// indexed ones changed (dirDigest).
+func resolutionNeeded(ctx context.Context, tx *sql.Tx, root string, changed bool, dirDigest string) (bool, error) {
 	if changed {
 		return true, nil
 	}
@@ -375,7 +387,59 @@ func resolutionNeeded(ctx context.Context, tx *sql.Tx, root string, changed bool
 	if err == sql.ErrNoRows {
 		return true, nil
 	}
-	return complete != 1, err
+	if err != nil || complete != 1 {
+		return true, err
+	}
+	var previous string
+	err = tx.QueryRowContext(ctx, "SELECT digest FROM repo_go_dirs WHERE repo=?", root).Scan(&previous)
+	if err == sql.ErrNoRows {
+		return true, nil
+	}
+	return previous != dirDigest, err
+}
+
+// goDirectoryDigest fingerprints the Go file entries (name and type) of the
+// directories holding type-checked sources. The type pass treats a package
+// whose directory holds a Go file it did not see (ignored, excluded,
+// symlinked) as incomplete, so adding or removing such a file changes typed
+// edges although no indexed source changed. Only entry names are read.
+func goDirectoryDigest(root string, dirs map[string]bool) (string, error) {
+	if !goTypesEnabled || len(dirs) == 0 {
+		return "", nil
+	}
+	anchor, err := os.OpenRoot(root)
+	if err != nil {
+		return "", err
+	}
+	defer anchor.Close()
+	names := make([]string, 0, len(dirs))
+	for dir := range dirs {
+		names = append(names, dir)
+	}
+	sort.Strings(names)
+	h := sha256.New()
+	for _, dir := range names {
+		fmt.Fprintf(h, "%s\x00", dir)
+		handle, err := anchor.Open(dir)
+		if err != nil {
+			fmt.Fprintf(h, "unreadable\n")
+			continue
+		}
+		entries, err := handle.ReadDir(-1)
+		handle.Close()
+		if err != nil {
+			fmt.Fprintf(h, "unreadable\n")
+			continue
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".go") {
+				fmt.Fprintf(h, "%s\x00%d\x00", entry.Name(), entry.Type())
+			}
+		}
+		fmt.Fprintf(h, "\n")
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 // resolveRepository recomputes every relation target of a generation.
