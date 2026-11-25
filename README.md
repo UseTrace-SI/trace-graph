@@ -138,7 +138,7 @@ Validation: `go test -race ./...`, `go test -race -tags treesitter ./...`, and e
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs pure Go builds, vet, race tests, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
+`.github/workflows/ci.yml` runs pure Go builds, vet, tests without the race detector (the only run that enforces wall-clock budgets), race tests, and 100 repetitions of the regression cases on GitHub-hosted macOS and Linux runners for pushes, pull requests, and manual runs. The workflow has read-only repository access. Hosted execution begins after these changes are pushed.
 Tree-sitter vet, race tests, and 100-run regressions are also included.
 
 ## Production bounds
