@@ -138,7 +138,7 @@ func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error
 				symKind = "type"
 			}
 			id := rel + ":" + name + ":" + strconv.Itoa(line)
-			out.symbol(id, name, symKind, line, kind+" "+name)
+			out.symbolBody(id, name, symKind, line, kind+" "+name, node.ChildByFieldName("body") != nil)
 			out.content(id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
 			n++
 			// calls within: find call_expression children

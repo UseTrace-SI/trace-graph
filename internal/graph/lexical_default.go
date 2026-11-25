@@ -279,6 +279,9 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 				pyBody(s, d, line)
 			} else {
 				lexBody(lang, s, d, start+m[3])
+				if d.callable && d.bodyStart < 0 && (lang == "javascript" || lang == "typescript") {
+					lexOverloadBody(lang, s, d, text, start, m[3])
+				}
 			}
 			d.supers = lexHeritage(lang, text, m[3])
 			key := d.name + "\x00" + strconv.Itoa(d.line)
@@ -443,6 +446,28 @@ func depthAt(s *lexSource, depths []int, offset int) int {
 // unless the next line continues the declaration. A bodyless declaration (a
 // TypeScript overload or a type alias written without semicolons) therefore
 // never takes a later declaration's body, and each search is bounded.
+// lexOverloadBody gives a bodyless TypeScript function declaration the body
+// of a later declaration of the same name on its line, as in
+// `function f(a: string): void; function f(a: any) { ... }`. The line holds
+// one identity, which then describes the implementation rather than the
+// overload signature.
+func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, after int) {
+	rest := text[after:]
+	if !strings.Contains(rest, "function") {
+		return
+	}
+	later := regexp.MustCompile(`\bfunction\s*\*?\s*` + regexp.QuoteMeta(d.name) + `\b`)
+	for _, m := range later.FindAllStringIndex(rest, -1) {
+		candidate := *d
+		lexBody(lang, s, &candidate, start+after+m[1])
+		if candidate.bodyStart >= 0 {
+			d.paramStart = start + after + m[1]
+			d.bodyStart, d.bodyEnd, d.endLine = candidate.bodyStart, candidate.bodyEnd, candidate.endLine
+			return
+		}
+	}
+}
+
 func lexBody(lang string, s *lexSource, d *lexDecl, from int) {
 	d.bodyStart, d.bodyEnd, d.endLine = -1, -1, d.line
 	parens, arrow := 0, -1

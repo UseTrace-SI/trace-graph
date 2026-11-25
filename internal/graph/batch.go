@@ -16,6 +16,8 @@ const (
 	observeContent
 	observeReceiver
 	observeRelation
+	// observeDropped marks a row replaced after recording; flush skips it.
+	observeDropped
 )
 
 // observation is one typed row recorded by a parser. IDs are unscoped; the
@@ -46,6 +48,10 @@ type fileBatch struct {
 	moduleOverride *string
 	rows           []observation
 	ids            map[string]bool
+	// starts holds the row of each kept declaration; bodyless marks kept
+	// declarations the parser reported without a body (overload signatures).
+	starts   map[string]int
+	bodyless map[string]bool
 	// strict batches fail on colliding identities (revision comparisons);
 	// others drop the later declaration, see symbol.
 	strict bool
@@ -73,21 +79,34 @@ func (b *fileBatch) collisionWarning() string {
 	if len(b.collisions) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("colliding declaration identities (%s): kept the first declaration of each and dropped %d later one(s) with their content, receivers and relationships; separate same-name declarations onto different lines", strings.Join(b.collisions, ", "), len(b.collisions))
+	return fmt.Sprintf("colliding declaration identities (%s): kept one declaration of each (the one with a body when the other has none, otherwise the first) and dropped %d other(s) with their content, receivers and relationships; separate same-name declarations onto different lines", strings.Join(b.collisions, ", "), len(b.collisions))
 }
 
-// symbol records a declaration. A second declaration with the same identity
-// (same file, name and line) cannot be stored without replacing the first,
-// so in a non-strict batch it is dropped together with the observations
-// recorded for it until the next declaration: every parser records a
-// declaration's content, receiver and calls right after the declaration
-// itself. Declaration-aware lexical analysis never yields duplicates.
+// symbol records a declaration whose body the parser does not report.
 func (b *fileBatch) symbol(id, name, kind string, line int, signature string) {
+	b.declare(id, name, kind, line, signature, false, false)
+}
+
+// symbolBody records a declaration and whether it has a body.
+func (b *fileBatch) symbolBody(id, name, kind string, line int, signature string, hasBody bool) {
+	b.declare(id, name, kind, line, signature, true, hasBody)
+}
+
+// declare records a declaration. A second declaration with the same
+// identity (same file, name and line) cannot be stored without replacing
+// the first, so in a non-strict batch one of them is dropped together with
+// the observations recorded for it until the next declaration: every parser
+// records a declaration's content, receiver and calls right after the
+// declaration itself. The first is kept, unless the parser reported it
+// bodyless and the later one with a body (a one-line TypeScript overload
+// signature and its implementation): then the implementation replaces it.
+// Declaration-aware lexical analysis never yields duplicates.
+func (b *fileBatch) declare(id, name, kind string, line int, signature string, bodyKnown, hasBody bool) {
 	if b.err != nil {
 		return
 	}
 	if b.ids == nil {
-		b.ids = map[string]bool{}
+		b.ids, b.starts, b.bodyless = map[string]bool{}, map[string]int{}, map[string]bool{}
 	}
 	if b.ids[id] {
 		if b.strict {
@@ -95,11 +114,23 @@ func (b *fileBatch) symbol(id, name, kind string, line int, signature string) {
 			return
 		}
 		b.collisions = append(b.collisions, id)
-		b.dropping = id
-		return
+		if !(bodyKnown && hasBody && b.bodyless[id]) {
+			b.dropping = id
+			return
+		}
+		// Drop the bodyless declaration's rows: its symbol up to the next
+		// declaration.
+		for i := b.starts[id]; i < len(b.rows); i++ {
+			if i > b.starts[id] && b.rows[i].symbolKind != "" { // a symbol row, kept or dropped
+				break
+			}
+			b.rows[i].kind = observeDropped
+		}
 	}
 	b.dropping = ""
 	b.ids[id] = true
+	b.starts[id] = len(b.rows)
+	b.bodyless[id] = bodyKnown && !hasBody
 	b.rows = append(b.rows, observation{kind: observeSymbol, id: id, namespace: b.namespace, name: name, symbolKind: kind, line: line, signature: signature})
 }
 

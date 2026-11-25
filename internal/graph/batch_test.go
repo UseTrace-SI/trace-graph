@@ -1,7 +1,9 @@
 package graph
 
 import (
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -105,5 +107,83 @@ func TestFileBatchDropsLaterCollidingDeclaration(t *testing.T) {
 	}
 	if w := b.collisionWarning(); !strings.Contains(w, "f.go:A:1") || !strings.Contains(w, "dropped 1") {
 		t.Fatalf("warning: %s", w)
+	}
+}
+
+// A one-line overload signature and its implementation share an identity;
+// the implementation is kept whichever comes first.
+func TestFileBatchPrefersDeclarationWithBody(t *testing.T) {
+	kept := func(b *fileBatch) string {
+		var out []string
+		for _, o := range b.rows {
+			switch o.kind {
+			case observeSymbol:
+				out = append(out, "symbol:"+o.signature)
+			case observeContent:
+				out = append(out, "content:"+o.hash[:4])
+			case observeRelation:
+				out = append(out, "call:"+o.toName)
+			}
+		}
+		return strings.Join(out, " ")
+	}
+	hash := func(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))[:4] }
+
+	b := (&indexWriter{}).batch("a.ts")
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false)
+	b.content("a.ts:f:1", []byte("sig"), 1)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true)
+	b.content("a.ts:f:1", []byte("impl"), 1)
+	b.call("a.ts:f:1", "f", "g", 1, 40, "unresolved")
+	b.symbolBody("a.ts:g:2", "g", "func", 2, "g", true)
+	if got, want := kept(b), "symbol:implementation content:"+hash("impl")+" call:g symbol:g"; got != want {
+		t.Fatalf("signature first: kept %s, want %s", got, want)
+	}
+	if len(b.collisions) != 1 || b.err != nil {
+		t.Fatalf("collision not recorded: %v %v", b.collisions, b.err)
+	}
+
+	b = (&indexWriter{}).batch("a.ts")
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true)
+	b.content("a.ts:f:1", []byte("impl"), 1)
+	b.call("a.ts:f:1", "f", "g", 1, 40, "unresolved")
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false)
+	b.content("a.ts:f:1", []byte("sig"), 1)
+	if got, want := kept(b), "symbol:implementation content:"+hash("impl")+" call:g"; got != want {
+		t.Fatalf("implementation first: kept %s, want %s", got, want)
+	}
+
+	// Without body information the first declaration is kept.
+	b = (&indexWriter{}).batch("a.ts")
+	b.symbol("a.ts:f:1", "f", "func", 1, "first")
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "second", true)
+	if got := kept(b); got != "symbol:first" {
+		t.Fatalf("unknown body: kept %s", got)
+	}
+
+	// Dropped rows are never stored.
+	db, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	w := &indexWriter{tx: tx}
+	defer w.close()
+	b = w.batch("a.ts")
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false)
+	b.content("a.ts:f:1", []byte("sig"), 1)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true)
+	b.content("a.ts:f:1", []byte("impl"), 1)
+	if err := w.flush("repo", b); err != nil {
+		t.Fatal(err)
+	}
+	var signature, stored string
+	if err := tx.QueryRow("SELECT s.signature,c.source_hash FROM symbols s JOIN symbol_content c ON c.symbol_id=s.id").Scan(&signature, &stored); err != nil || signature != "implementation" || stored[:4] != hash("impl") {
+		t.Fatalf("stored %q %q %v", signature, stored, err)
 	}
 }

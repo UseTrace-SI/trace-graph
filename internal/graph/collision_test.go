@@ -114,3 +114,35 @@ func TestAnalyzeRepoDropsCollidingDeclarationsWithWarning(t *testing.T) {
 		t.Fatalf("deleted file still reported: %+v %v", report, err)
 	}
 }
+
+// A one-line TypeScript overload signature and its implementation: the
+// symbol keeps the implementation and its calls in every build.
+func TestOneLineOverloadKeepsImplementation(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := "export function f(a: string): void; export function f(a: any) { g(a) }\nfunction g(x: any) {}\n"
+	if err := os.WriteFile(filepath.Join(root, "a.ts"), []byte(src), 0600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := AnalyzeRepo(root, db); err != nil {
+		t.Fatal(err)
+	}
+	var signature string
+	if err := db.QueryRow("SELECT signature FROM symbols WHERE repo=? AND name='f'", root).Scan(&signature); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(signature, "function_signature") {
+		t.Fatalf("bodyless overload kept: %q", signature)
+	}
+	var calls int
+	if err := db.QueryRow("SELECT count(*) FROM relations WHERE repo=? AND from_symbol='f' AND to_symbol='g'", root).Scan(&calls); err != nil || calls != 1 {
+		t.Fatalf("implementation's call lost: %d %v", calls, err)
+	}
+}
