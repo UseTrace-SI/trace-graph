@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS file_warnings(repo TEXT NOT NULL,path TEXT NOT NULL,w
 			}
 		}
 	}
+	// repo_go_dirs existed only in unreleased builds; the Go directory
+	// fingerprint now lives in repo_resolution.detail.
+	if _, err := tx.Exec("DROP TABLE IF EXISTS repo_go_dirs"); err != nil {
+		return err
+	}
 	// Created after the migrations, which add the terms column to an older
 	// index; see FillSearchTerms.
 	if _, err := tx.Exec("CREATE INDEX IF NOT EXISTS symbols_missing_terms ON symbols(repo) WHERE terms IS NULL"); err != nil {

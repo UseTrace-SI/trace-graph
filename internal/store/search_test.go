@@ -202,3 +202,23 @@ func TestEmbeddingSchemaUpgradeClearsOutdatedVectors(t *testing.T) {
 		t.Fatalf("vectors=%d symbols=%d %v", vectors, symbols, err)
 	}
 }
+
+func TestOrphanGoDirectoryTableIsDropped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "g.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("CREATE TABLE repo_go_dirs(repo TEXT PRIMARY KEY,digest TEXT NOT NULL)"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if db, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='repo_go_dirs'").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("orphan table kept: %d %v", n, err)
+	}
+}
