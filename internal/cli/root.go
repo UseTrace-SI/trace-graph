@@ -65,6 +65,7 @@ func newRoot() *cobra.Command {
 	root.AddCommand(capabilitiesCmd())
 	root.AddCommand(contextCmd())
 	root.AddCommand(refreshCmd())
+	root.AddCommand(mcpCmd())
 	return root
 }
 
@@ -155,72 +156,43 @@ func queryCmd() *cobra.Command {
 }
 
 func neighborsCmd() *cobra.Command {
-	return &cobra.Command{Use: "neighbors", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "neighbors <symbol-or-id>", Short: "Show a symbol's definitions and direct callers", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := readIndex()
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		name := args[0]
-		rows, err := db.Query("SELECT file,line,kind FROM symbols WHERE (name=? OR id=?) AND repo=?", name, name, repoPath)
+		result, err := lookupNeighbors(cmd.Context(), db, repoPath, args[0], 0)
 		if err != nil {
 			return err
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "definitions:")
-		for rows.Next() {
-			var file, kind string
-			var line int
-			if err := rows.Scan(&file, &line, &kind); err != nil {
-				rows.Close()
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s:%d  %s\n", file, line, kind)
+		for _, d := range result.Definitions {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s:%d  %s\n", d.File, d.Line, d.Kind)
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
-		r2, err := db.Query(`SELECT DISTINCT r.from_symbol,r.file,r.line FROM relations r LEFT JOIN relation_targets t ON t.relation_id=r.id
- WHERE r.repo=? AND r.kind IN ('call','dispatch') AND (t.to_id IN (SELECT id FROM symbols WHERE repo=? AND (name=? OR id=?)) OR (t.relation_id IS NULL AND r.to_symbol=?)) ORDER BY r.file,r.line`, repoPath, repoPath, name, name, name)
-		if err != nil {
-			return err
-		}
-		defer r2.Close()
 		fmt.Fprintln(cmd.OutOrStdout(), "callers (neighbors):")
-		for r2.Next() {
-			var sym, file string
-			var line int
-			if err := r2.Scan(&sym, &file, &line); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s  %s:%d\n", sym, file, line)
+		for _, c := range result.Callers {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s  %s:%d\n", c.Symbol, c.File, c.Line)
 		}
-		return r2.Err()
+		return nil
 	}}
 }
 
 func defCmd() *cobra.Command {
-	return &cobra.Command{Use: "def", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "def <name>", Short: "Show definitions and signatures for a symbol name", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := readIndex()
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query("SELECT file,line,kind,COALESCE(signature,'') FROM symbols WHERE name=? AND repo=?", args[0], repoPath)
+		defs, err := lookupDefinitions(cmd.Context(), db, repoPath, args[0], 0)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var file, kind, sig string
-			var line int
-			if err := rows.Scan(&file, &line, &kind, &sig); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  [%s] %s\n", file, line, kind, sig)
+		for _, d := range defs {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  [%s] %s\n", d.File, d.Line, d.Kind, d.Signature)
 		}
-		return rows.Err()
+		return nil
 	}}
 }
 
@@ -259,117 +231,131 @@ func splitNUL(data []byte, atEOF bool) (int, []byte, error) {
 	return 0, nil, nil
 }
 
+// cochangePair is a pair of source files changed together Count times.
+type cochangePair struct {
+	Count int    `json:"count"`
+	A     string `json:"a"`
+	B     string `json:"b"`
+}
+
+// cochangePairs reads a bounded, NUL-delimited git log of the last
+// maxCount commits and returns the source file pairs changed together at
+// least twice, most frequent first.
+func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxBytes int) ([]cochangePair, error) {
+	if maxCount < 1 || maxCount > 1000 || maxPairs < 1 || maxPairs > 100000 || maxBytes < 1024 || maxBytes > 64<<20 {
+		return nil, fmt.Errorf("max-count must be 1-1000, max-pairs 1-100000 and max-log-bytes 1024-67108864")
+	}
+	// Stream a bounded log instead of loading all history into memory. The
+	// isolated invocation cannot be redirected to another repository by
+	// ambient GIT_* variables and never fetches missing objects.
+	gitcmd := graph.LocalGitCommand(ctx, repo, "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
+	pipe, err := gitcmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr bytes.Buffer
+	gitcmd.Stderr = &stderr
+	if err := gitcmd.Start(); err != nil {
+		return nil, err
+	}
+	waited := false
+	defer func() {
+		if !waited {
+			_ = gitcmd.Process.Kill()
+			_ = gitcmd.Wait()
+		}
+	}()
+	maxFilesPerCommit := maxFilesForPairBudget(maxPairs)
+	type pair struct{ a, b string }
+	counts := map[pair]int{}
+	limited := &io.LimitedReader{R: pipe, N: int64(maxBytes) + 1}
+	scanner := bufio.NewScanner(limited)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	// Without -z Git quotes paths containing non-ASCII or special bytes
+	// ("\303\274ber.go"), which then failed the source filter and were
+	// silently dropped. NUL-delimited names are raw; an empty record still
+	// separates commits.
+	scanner.Split(splitNUL)
+	var current []string
+	overBudget := false
+	flush := func() {
+		for i := 0; i < len(current) && !overBudget; i++ {
+			for j := i + 1; j < len(current); j++ {
+				a, b := current[i], current[j]
+				if a > b {
+					a, b = b, a
+				}
+				// The budget bounds unique pairs: counting another
+				// co-change of a known pair never exceeds it.
+				key := pair{a, b}
+				if _, known := counts[key]; !known && len(counts) >= maxPairs {
+					overBudget = true
+					break
+				}
+				counts[key]++
+			}
+		}
+		current = nil
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			flush()
+			continue
+		}
+		if !graph.InspectableSource(line) || len(current) >= maxFilesPerCommit {
+			continue
+		}
+		current = append(current, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading git log: %w", err)
+	}
+	if limited.N <= 0 {
+		return nil, fmt.Errorf("cochange log exceeds %d bytes", maxBytes)
+	}
+	flush()
+	waitErr := gitcmd.Wait()
+	waited = true
+	if waitErr != nil {
+		return nil, fmt.Errorf("listing co-change history: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
+	}
+	if overBudget {
+		return nil, fmt.Errorf("cochange exceeds %d unique file pairs", maxPairs)
+	}
+
+	entries := make([]cochangePair, 0, len(counts))
+	for p, n := range counts {
+		if n >= 2 {
+			entries = append(entries, cochangePair{Count: n, A: p.a, B: p.b})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Count != entries[j].Count {
+			return entries[i].Count > entries[j].Count
+		}
+		if entries[i].A != entries[j].A {
+			return entries[i].A < entries[j].A
+		}
+		return entries[i].B < entries[j].B
+	})
+	return entries, nil
+}
+
 func cochangeCmd() *cobra.Command {
 	var maxCount, maxPairs, maxBytes int
 	cmd := &cobra.Command{Use: "cochange", Short: "Report files that change together", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
-		if maxCount < 1 || maxCount > 1000 || maxPairs < 1 || maxPairs > 100000 || maxBytes < 1024 || maxBytes > 64<<20 {
-			return fmt.Errorf("max-count must be 1-1000, max-pairs 1-100000 and max-log-bytes 1024-67108864")
-		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
 		defer cancel()
-		// Stream a bounded log instead of loading all history into memory. The
-		// isolated invocation cannot be redirected to another repository by
-		// ambient GIT_* variables and never fetches missing objects.
-		gitcmd := graph.LocalGitCommand(ctx, repoPath, "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
-		pipe, err := gitcmd.StdoutPipe()
+		entries, err := cochangePairs(ctx, repoPath, maxCount, maxPairs, maxBytes)
 		if err != nil {
 			return err
 		}
-		var stderr bytes.Buffer
-		gitcmd.Stderr = &stderr
-		if err := gitcmd.Start(); err != nil {
-			return err
-		}
-		waited := false
-		defer func() {
-			if !waited {
-				_ = gitcmd.Process.Kill()
-				_ = gitcmd.Wait()
-			}
-		}()
-		maxFilesPerCommit := maxFilesForPairBudget(maxPairs)
-		type pair struct{ a, b string }
-		counts := map[pair]int{}
-		limited := &io.LimitedReader{R: pipe, N: int64(maxBytes) + 1}
-		scanner := bufio.NewScanner(limited)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		// Without -z Git quotes paths containing non-ASCII or special bytes
-		// ("\303\274ber.go"), which then failed the source filter and were
-		// silently dropped. NUL-delimited names are raw; an empty record still
-		// separates commits.
-		scanner.Split(splitNUL)
-		var current []string
-		overBudget := false
-		flush := func() {
-			for i := 0; i < len(current) && !overBudget; i++ {
-				for j := i + 1; j < len(current); j++ {
-					a, b := current[i], current[j]
-					if a > b {
-						a, b = b, a
-					}
-					// The budget bounds unique pairs: counting another
-					// co-change of a known pair never exceeds it.
-					key := pair{a, b}
-					if _, known := counts[key]; !known && len(counts) >= maxPairs {
-						overBudget = true
-						break
-					}
-					counts[key]++
-				}
-			}
-			current = nil
-		}
-		for scanner.Scan() {
-			line := scanner.Text()
-			if line == "" {
-				flush()
-				continue
-			}
-			if !graph.InspectableSource(line) || len(current) >= maxFilesPerCommit {
-				continue
-			}
-			current = append(current, line)
-		}
-		if err := scanner.Err(); err != nil {
-			return fmt.Errorf("reading git log: %w", err)
-		}
-		if limited.N <= 0 {
-			return fmt.Errorf("cochange log exceeds %d bytes", maxBytes)
-		}
-		flush()
-		waitErr := gitcmd.Wait()
-		waited = true
-		if waitErr != nil {
-			return fmt.Errorf("listing co-change history: %w: %s", waitErr, strings.TrimSpace(stderr.String()))
-		}
-		if overBudget {
-			return fmt.Errorf("cochange exceeds %d unique file pairs", maxPairs)
-		}
-
-		type entry struct {
-			a, b string
-			n    int
-		}
-		entries := make([]entry, 0, len(counts))
-		for p, n := range counts {
-			if n >= 2 {
-				entries = append(entries, entry{p.a, p.b, n})
-			}
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].n != entries[j].n {
-				return entries[i].n > entries[j].n
-			}
-			if entries[i].a != entries[j].a {
-				return entries[i].a < entries[j].a
-			}
-			return entries[i].b < entries[j].b
-		})
 		for i, e := range entries {
 			if i >= 20 {
 				break
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%d  %s  <->  %s\n", e.n, e.a, e.b)
+			fmt.Fprintf(cmd.OutOrStdout(), "%d  %s  <->  %s\n", e.Count, e.A, e.B)
 		}
 		if len(entries) == 0 {
 			fmt.Fprintln(cmd.OutOrStdout(), "no co-change data")

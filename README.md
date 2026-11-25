@@ -14,7 +14,7 @@ describe the checkout when indexed, with their index timestamp.
 
 Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 `query`, `neighbors`, `impact`, `health`, `snapshot`, `changes`, `compare`,
-`def`, `cochange`, `capabilities`, `context`, `refresh`.
+`def`, `cochange`, `capabilities`, `context`, `refresh`, `mcp`.
 
 - `trace-graph version` — print the coordinated bundle version.
 - `trace-graph analyze [--repo .]` — index the current checkout in place.
@@ -36,6 +36,7 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 - `trace-graph capabilities` — JSON description of the compiled analyzer.
 - `trace-graph context [--path FILE] [--query words] [--limit 20] [--semantic]` — bounded, read-only protocol-1 JSON; `--query` uses the ranked `query` search even with `--path`, and `--semantic` reranks a bounded candidate set (the 500 best search matches plus up to 500 symbols in files whose path contains a query word, within `--path` when given) by local embeddings.
 - `trace-graph refresh [--repo .]` — index and return protocol-1 JSON.
+- `trace-graph mcp [--repo .]` — serve read-only MCP tools over stdio (see below).
 
 All analysis and inspection commands remain repository-scoped. `cochange` uses
 the same supported-file and exclusion policy as indexing, scans at most
@@ -44,6 +45,30 @@ the same supported-file and exclusion policy as indexing, scans at most
 special-character paths are kept. `symbols`, `query`, `neighbors` and `def`
 open the index read-only like `health` and `impact`: they never create or
 migrate it and answer from the last committed generation while a refresh runs.
+
+## MCP server
+
+`trace-graph mcp` serves the code map of `--repo` to an MCP client over
+stdin/stdout, using the same MCP Go SDK as Trace Brain. Every tool is
+read-only and repository-scoped, opens the last committed index generation
+per call (it never creates, migrates or refreshes it), has a two-second
+deadline (ten seconds for `graph_cochange`) and returns at most 64 KiB of
+structured JSON, dropping trailing entries with `truncated: true` beyond that.
+
+| Tool | Input | Returns |
+| --- | --- | --- |
+| `graph_search` | `query`, `path?`, `limit` 1–50 (20) | ranked symbols, as `query` |
+| `graph_def` | `name`, `limit` 1–50 (20) | definitions with signatures, as `def` |
+| `graph_neighbors` | `symbol` (name or ID), `limit` 1–50 (20) | definitions and direct callers, as `neighbors` |
+| `graph_impact` | `symbol`, `direction`, `depth` 1–20 (3), `limit` 1–200 (50), `include_dispatch` | transitive report, as `impact --json` |
+| `graph_context` | `query?`, `path?`, `limit` 1–50 (20), `semantic` | protocol-1 context, as `context` |
+| `graph_cochange` | `max_count` 1–1000 (200), `limit` 1–50 (20) | co-changing file pairs, as `cochange` |
+
+Example client configuration:
+
+```json
+{"mcpServers": {"trace-graph": {"command": "trace-graph", "args": ["--repo", "/path/to/repo", "mcp"]}}}
+```
 
 ## Build
 `go build ./...`
