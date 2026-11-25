@@ -146,3 +146,43 @@ func TestOneLineOverloadKeepsImplementation(t *testing.T) {
 		t.Fatalf("implementation's call lost: %d %v", calls, err)
 	}
 }
+
+// Only a sibling declaration is the implementation of a one-line overload
+// signature: a same-named function expression (argument, IIFE) or a
+// declaration nested in another body is a different function.
+func TestOneLineOverloadIgnoresOtherSameNamedFunctions(t *testing.T) {
+	for _, tc := range []struct{ name, src string }{
+		{"argument", "export function h(a: string): void; foo(function h() { wrong() }); export function h(a: any) { right(a) }\n"},
+		{"iife", "function h(a: string): void; (function h() { wrong() })(); function h(a: any) { right(a) }\n"},
+		{"nested", "function h(a: string): void; function outer() { function h() { wrong() } } function h(a: any) { right(a) }\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := tc.src + "function right(x: any) {}\nfunction wrong() {}\nfunction foo(f: any) {}\nfunction outer2() {}\n"
+			if err := os.WriteFile(filepath.Join(root, "a.ts"), []byte(src), 0600); err != nil {
+				t.Fatal(err)
+			}
+			db, err := store.Open(filepath.Join(t.TempDir(), "graph.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := AnalyzeRepo(root, db); err != nil {
+				t.Fatal(err)
+			}
+			calls := func(to string) int {
+				var n int
+				if err := db.QueryRow("SELECT count(*) FROM relations WHERE repo=? AND from_symbol='h' AND to_symbol=? AND kind='call'", root, to).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			if calls("right") != 1 || calls("wrong") != 0 {
+				t.Fatalf("h -> right %d, h -> wrong %d", calls("right"), calls("wrong"))
+			}
+		})
+	}
+}

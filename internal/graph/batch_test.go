@@ -130,12 +130,12 @@ func TestFileBatchPrefersDeclarationWithBody(t *testing.T) {
 	hash := func(s string) string { return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))[:4] }
 
 	b := (&indexWriter{}).batch("a.ts")
-	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false, "")
 	b.content("a.ts:f:1", []byte("sig"), 1)
-	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true, "")
 	b.content("a.ts:f:1", []byte("impl"), 1)
 	b.call("a.ts:f:1", "f", "g", 1, 40, "unresolved")
-	b.symbolBody("a.ts:g:2", "g", "func", 2, "g", true)
+	b.symbolBody("a.ts:g:2", "g", "func", 2, "g", true, "")
 	if got, want := kept(b), "symbol:implementation content:"+hash("impl")+" call:g symbol:g"; got != want {
 		t.Fatalf("signature first: kept %s, want %s", got, want)
 	}
@@ -144,10 +144,10 @@ func TestFileBatchPrefersDeclarationWithBody(t *testing.T) {
 	}
 
 	b = (&indexWriter{}).batch("a.ts")
-	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true, "")
 	b.content("a.ts:f:1", []byte("impl"), 1)
 	b.call("a.ts:f:1", "f", "g", 1, 40, "unresolved")
-	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false, "")
 	b.content("a.ts:f:1", []byte("sig"), 1)
 	if got, want := kept(b), "symbol:implementation content:"+hash("impl")+" call:g"; got != want {
 		t.Fatalf("implementation first: kept %s, want %s", got, want)
@@ -156,7 +156,7 @@ func TestFileBatchPrefersDeclarationWithBody(t *testing.T) {
 	// Without body information the first declaration is kept.
 	b = (&indexWriter{}).batch("a.ts")
 	b.symbol("a.ts:f:1", "f", "func", 1, "first")
-	b.symbolBody("a.ts:f:1", "f", "func", 1, "second", true)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "second", true, "")
 	if got := kept(b); got != "symbol:first" {
 		t.Fatalf("unknown body: kept %s", got)
 	}
@@ -175,9 +175,9 @@ func TestFileBatchPrefersDeclarationWithBody(t *testing.T) {
 	w := &indexWriter{tx: tx}
 	defer w.close()
 	b = w.batch("a.ts")
-	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false, "")
 	b.content("a.ts:f:1", []byte("sig"), 1)
-	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true)
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true, "")
 	b.content("a.ts:f:1", []byte("impl"), 1)
 	if err := w.flush("repo", b); err != nil {
 		t.Fatal(err)

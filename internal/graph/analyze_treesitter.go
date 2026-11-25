@@ -107,6 +107,19 @@ func tsDeclarationName(node *ts.Node) *ts.Node {
 	return nil
 }
 
+// tsScope identifies the node a declaration belongs to, looking through an
+// export statement, so sibling declarations share it.
+func tsScope(node *ts.Node) string {
+	parent := node.Parent()
+	if parent != nil && parent.Kind() == "export_statement" {
+		parent = parent.Parent()
+	}
+	if parent == nil {
+		return ""
+	}
+	return strconv.FormatUint(uint64(parent.Id()), 10)
+}
+
 func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error) {
 	out.namespace = rel
 	n := 0
@@ -138,7 +151,13 @@ func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error
 				symKind = "type"
 			}
 			id := rel + ":" + name + ":" + strconv.Itoa(line)
-			out.symbolBody(id, name, symKind, line, kind+" "+name, node.ChildByFieldName("body") != nil)
+			if kind == "function_expression" || kind == "generator_function" {
+				// A named function expression is never the implementation
+				// of a same-named overload signature: keep the first.
+				out.symbol(id, name, symKind, line, kind+" "+name)
+			} else {
+				out.symbolBody(id, name, symKind, line, kind+" "+name, node.ChildByFieldName("body") != nil, tsScope(node))
+			}
 			out.content(id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
 			n++
 			// calls within: find call_expression children

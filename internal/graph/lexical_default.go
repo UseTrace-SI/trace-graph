@@ -450,7 +450,10 @@ func depthAt(s *lexSource, depths []int, offset int) int {
 // of a later declaration of the same name on its line, as in
 // `function f(a: string): void; function f(a: any) { ... }`. The line holds
 // one identity, which then describes the implementation rather than the
-// overload signature.
+// overload signature. A candidate must start a statement at the signature's
+// nesting level (after `;` or `}`, optionally behind export, default, async
+// or declare): a same-named function expression passed as an argument or a
+// declaration inside another body is a different function.
 func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, after int) {
 	rest := text[after:]
 	if !strings.Contains(rest, "function") {
@@ -458,8 +461,11 @@ func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, 
 	}
 	later := regexp.MustCompile(`\bfunction\s*\*?\s*` + regexp.QuoteMeta(d.name))
 	for _, m := range later.FindAllStringIndex(rest, -1) {
-		if m[1] < len(rest) && lexIdentByte(rest[m[1]], true) {
+		if m[1] < len(rest) && (rest[m[1]] >= 0x80 || lexIdentByte(rest[m[1]], true)) {
 			continue // a longer name
+		}
+		if !lexStatementStart(rest[:m[0]]) || !lexBalanced(rest[:m[0]]) {
+			continue
 		}
 		candidate := *d
 		lexBody(lang, s, &candidate, start+after+m[1])
@@ -469,6 +475,43 @@ func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, 
 			return
 		}
 	}
+}
+
+// lexStatementStart reports whether masked code ending in before leaves the
+// next token at the start of a statement.
+func lexStatementStart(before string) bool {
+	for {
+		before = strings.TrimRight(before, " \t")
+		trimmed := false
+		for _, keyword := range []string{"export", "default", "async", "declare"} {
+			if strings.HasSuffix(before, keyword) && (len(before) == len(keyword) || !lexIdentByte(before[len(before)-len(keyword)-1], true) && before[len(before)-len(keyword)-1] < 0x80) {
+				before = before[:len(before)-len(keyword)]
+				trimmed = true
+				break
+			}
+		}
+		if !trimmed {
+			break
+		}
+	}
+	return strings.HasSuffix(before, ";") || strings.HasSuffix(before, "}")
+}
+
+// lexBalanced reports whether masked code closes every bracket it opens and
+// never closes one it did not open.
+func lexBalanced(code string) bool {
+	depth := 0
+	for i := 0; i < len(code); i++ {
+		switch code[i] {
+		case '{', '(', '[':
+			depth++
+		case '}', ')', ']':
+			if depth--; depth < 0 {
+				return false
+			}
+		}
+	}
+	return depth == 0
 }
 
 func lexBody(lang string, s *lexSource, d *lexDecl, from int) {

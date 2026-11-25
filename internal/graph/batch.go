@@ -52,6 +52,7 @@ type fileBatch struct {
 	// declarations the parser reported without a body (overload signatures).
 	starts   map[string]int
 	bodyless map[string]bool
+	scopes   map[string]string
 	// strict batches fail on colliding identities (revision comparisons);
 	// others drop the later declaration, see symbol.
 	strict bool
@@ -84,12 +85,14 @@ func (b *fileBatch) collisionWarning() string {
 
 // symbol records a declaration whose body the parser does not report.
 func (b *fileBatch) symbol(id, name, kind string, line int, signature string) {
-	b.declare(id, name, kind, line, signature, false, false)
+	b.declare(id, name, kind, line, signature, false, false, "")
 }
 
-// symbolBody records a declaration and whether it has a body.
-func (b *fileBatch) symbolBody(id, name, kind string, line int, signature string, hasBody bool) {
-	b.declare(id, name, kind, line, signature, true, hasBody)
+// symbolBody records a declaration, whether it has a body and the scope it
+// is declared in (any key that is equal for siblings, such as the parent
+// node). Only a sibling can be the implementation of an overload signature.
+func (b *fileBatch) symbolBody(id, name, kind string, line int, signature string, hasBody bool, scope string) {
+	b.declare(id, name, kind, line, signature, true, hasBody, scope)
 }
 
 // declare records a declaration. A second declaration with the same
@@ -98,15 +101,15 @@ func (b *fileBatch) symbolBody(id, name, kind string, line int, signature string
 // the observations recorded for it until the next declaration: every parser
 // records a declaration's content, receiver and calls right after the
 // declaration itself. The first is kept, unless the parser reported it
-// bodyless and the later one with a body (a one-line TypeScript overload
+// bodyless and a later sibling with a body (a one-line TypeScript overload
 // signature and its implementation): then the implementation replaces it.
 // Declaration-aware lexical analysis never yields duplicates.
-func (b *fileBatch) declare(id, name, kind string, line int, signature string, bodyKnown, hasBody bool) {
+func (b *fileBatch) declare(id, name, kind string, line int, signature string, bodyKnown, hasBody bool, scope string) {
 	if b.err != nil {
 		return
 	}
 	if b.ids == nil {
-		b.ids, b.starts, b.bodyless = map[string]bool{}, map[string]int{}, map[string]bool{}
+		b.ids, b.starts, b.bodyless, b.scopes = map[string]bool{}, map[string]int{}, map[string]bool{}, map[string]string{}
 	}
 	if b.ids[id] {
 		if b.strict {
@@ -114,7 +117,7 @@ func (b *fileBatch) declare(id, name, kind string, line int, signature string, b
 			return
 		}
 		b.collisions = append(b.collisions, id)
-		if !(bodyKnown && hasBody && b.bodyless[id]) {
+		if !(bodyKnown && hasBody && b.bodyless[id] && b.scopes[id] == scope) {
 			b.dropping = id
 			return
 		}
@@ -131,6 +134,7 @@ func (b *fileBatch) declare(id, name, kind string, line int, signature string, b
 	b.ids[id] = true
 	b.starts[id] = len(b.rows)
 	b.bodyless[id] = bodyKnown && !hasBody
+	b.scopes[id] = scope
 	b.rows = append(b.rows, observation{kind: observeSymbol, id: id, namespace: b.namespace, name: name, symbolKind: kind, line: line, signature: signature})
 }
 

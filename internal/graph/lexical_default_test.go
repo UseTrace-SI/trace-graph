@@ -342,3 +342,22 @@ func TestLexicalOverloadTakesImplementationBodyOnItsLine(t *testing.T) {
 		}
 	}
 }
+
+func TestLexicalOverloadRejectsNonSiblingCandidates(t *testing.T) {
+	for _, src := range []string{
+		"function h(a: string): void; foo(function h() { wrong() });\n",
+		"function h(a: string): void; (function h() { wrong() })();\n",
+		"function h(a: string): void; function outer() { function h() { wrong() } }\n",
+		"function f(a: string): void; function fé() { wrong() }\n",
+		"function f(a: string): void; x = function f() { wrong() }\n",
+	} {
+		decls := lexDeclarations("typescript", newLexSource("typescript", src))
+		if len(decls) == 0 || decls[0].bodyStart >= 0 {
+			t.Errorf("%q borrowed a body", src)
+		}
+	}
+	decls := lexDeclarations("typescript", newLexSource("typescript", "export function h(a: string): void; foo(function h() {}); export default async function h(a: any) { right(a) }\n"))
+	if len(decls) == 0 || decls[0].bodyStart < 0 {
+		t.Fatal("sibling implementation after export default async not found")
+	}
+}

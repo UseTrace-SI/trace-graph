@@ -138,7 +138,7 @@ func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error
 				kind = "method"
 			}
 			id := goSymbolID(rel, d.Name.Name, line)
-			out.symbolBody(id, d.Name.Name, kind, line, goSignature(fset, d), d.Body != nil)
+			out.symbolBody(id, d.Name.Name, kind, line, goSignature(fset, d), d.Body != nil, "")
 			out.content(id, src[position(d.Pos()).Offset:position(d.End()).Offset], position(d.End()).Line)
 			if d.Recv != nil && len(d.Recv.List) == 1 {
 				if receiver := declaredTypeName(packageLevel, d.Recv.List[0].Type); receiver != "" {
