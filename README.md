@@ -10,6 +10,38 @@ CLI publishes bounded derived context to the hosted dashboard. Raw companion
 SQLite files and manual/MCP-authored Brain notes remain local. Graph snapshots
 describe the checkout when indexed, with their index timestamp.
 
+## Quick start
+
+```sh
+go build -o trace-graph ./cmd/trace-graph          # default build (pure Go)
+go build -tags treesitter -o trace-graph ./cmd/trace-graph   # Tree-sitter build (needs a C toolchain)
+
+cd /path/to/repo
+trace-graph analyze                      # index; later runs re-analyze only changed files
+trace-graph query analyze repo           # ranked search: AnalyzeRepo, analyzeFile, ...
+trace-graph def AnalyzeRepo              # definitions with signatures
+trace-graph neighbors AnalyzeRepo        # direct callers
+trace-graph impact AnalyzeRepo --depth 2 # transitive callers (--direction callees|both)
+trace-graph context --query "parse config" --semantic   # protocol-1 JSON for agents
+trace-graph health                       # coverage, resolution and skipped files
+trace-graph mcp                          # the same lookups as read-only MCP tools
+```
+
+## What each language gets
+
+| Language (extensions) | Default build (`inventory-v8`) | Tree-sitter build (`treesitter-v5`) |
+| --- | --- | --- |
+| Go (`.go`) | `go/parser` declarations (func, method, type, var/const) with extents; calls resolved package-wide by `go/types` (`typed`) or syntax evidence; `implements` and interface `dispatch` edges; net/http, gorilla, chi, gin and echo routes | grammar declarations; calls observed, targets unresolved; no type pass |
+| TypeScript / JavaScript (`.ts` `.tsx` `.mts` `.cts` `.js` `.jsx` `.mjs` `.cjs`) | declaration-aware lexical analysis: declarations with extents and containers, calls resolved through same-file declarations and explicit imports, imports resolved to repository files, `extends`/`implements`, Express/Hono routes | grammar declarations; calls observed, unresolved; imports and routes from the shared lexical extractor, resolved to module files |
+| Python (`.py`) | as TypeScript/JavaScript; FastAPI/Flask decorator routes | as TypeScript/JavaScript; decorated route functions are handler targets |
+| Rust (`.rs`), Java (`.java`) | as TypeScript/JavaScript (Rust `crate::`/`self::`/`super::` and `mod` files; Java class files and same-package classes) | grammar declarations; calls observed, unresolved; imports from the shared extractor |
+| C (`.c`), C++ (`.cc` `.cpp` `.cxx`), headers (`.h` `.hh` `.hpp` `.hxx`) | lexical inventory: line-level declarations (classes, structs, enums), no calls | grammar declarations (functions); calls observed, unresolved; headers use the C++ grammar |
+| Ruby (`.rb`) | lexical inventory | grammar declarations (methods); calls observed, unresolved |
+| C#, Kotlin, Swift, Scala, Dart, PHP, Lua, R, SQL, shell, Haskell, Elixir, Erlang, Clojure, CUE, Groovy, HCL/Terraform, Julia, OCaml, Objective-C (`.m`), Perl, Protobuf, Zig | lexical inventory: line-level declarations, no calls | not indexed |
+
+YAML and other configuration files are not indexed. `trace-graph capabilities`
+reports the analyzer and limitations of the binary at hand.
+
 ## Commands
 
 Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,

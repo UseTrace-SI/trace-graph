@@ -24,8 +24,19 @@ var dbPath string
 var repoPath string
 
 func newRoot() *cobra.Command {
-	root := &cobra.Command{Use: "trace-graph", Short: "Code map for Trace"}
-	root.PersistentFlags().StringVar(&dbPath, "db", ".trace-graph/graph.db", "graph database path")
+	root := &cobra.Command{Use: "trace-graph", Short: "Code map for Trace", Long: `Code map for Trace: indexes a repository's files, symbols and relationships
+(calls, imports, routes, implements) into a local SQLite database and answers
+lookups from it.
+
+Quick start:
+  trace-graph analyze                    index the current checkout (incremental)
+  trace-graph query analyze repo         ranked symbol search by name and words
+  trace-graph def AnalyzeRepo            definitions and signatures
+  trace-graph neighbors AnalyzeRepo      direct callers
+  trace-graph impact AnalyzeRepo         transitive callers (--direction callees)
+  trace-graph context --query "parse config" --semantic
+  trace-graph mcp                        serve the same lookups to an MCP client`}
+	root.PersistentFlags().StringVar(&dbPath, "db", "", "graph database path (default <repo>/.trace-graph/graph.db, or <repo>/.trace/graph/graph.db in a Trace project)")
 	root.PersistentFlags().StringVar(&repoPath, "repo", ".", "repository root")
 	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
 		if cmd.Name() == "version" || cmd.Name() == "capabilities" {
@@ -40,7 +51,7 @@ func newRoot() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		if !root.PersistentFlags().Changed("db") {
+		if !root.PersistentFlags().Changed("db") || dbPath == "" {
 			dbPath = filepath.Join(repoPath, ".trace-graph", "graph.db")
 			if _, err := os.Stat(dbPath); os.IsNotExist(err) {
 				if _, err := os.Stat(filepath.Join(repoPath, ".trace", "trace.db")); err == nil {
@@ -85,13 +96,13 @@ func openDB() (*sql.DB, error) {
 var Version = "dev"
 
 func versionCmd() *cobra.Command {
-	return &cobra.Command{Use: "version", Run: func(cmd *cobra.Command, args []string) {
+	return &cobra.Command{Use: "version", Short: "Print the coordinated bundle version", Args: cobra.NoArgs, Run: func(cmd *cobra.Command, args []string) {
 		fmt.Fprintln(cmd.OutOrStdout(), "trace-graph "+Version)
 	}}
 }
 
 func analyzeCmd() *cobra.Command {
-	return &cobra.Command{Use: "analyze", RunE: func(cmd *cobra.Command, args []string) error {
+	return &cobra.Command{Use: "analyze", Short: "Index the repository (only changed files are re-analyzed)", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		db, err := openDB()
 		if err != nil {
 			return err
@@ -250,7 +261,7 @@ func defCmd() *cobra.Command {
 }
 
 func capabilitiesCmd() *cobra.Command {
-	return &cobra.Command{Use: "capabilities", Run: func(cmd *cobra.Command, args []string) {
+	return &cobra.Command{Use: "capabilities", Short: "Describe the compiled analyzer and its limitations as JSON", Args: cobra.NoArgs, Run: func(cmd *cobra.Command, args []string) {
 		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(graph.Capabilities())
 	}}
 }
