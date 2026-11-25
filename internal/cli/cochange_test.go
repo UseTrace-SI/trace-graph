@@ -274,3 +274,53 @@ func TestCochangeIncludesConfigurationFiles(t *testing.T) {
 		}
 	}
 }
+
+// With --repo selecting a subdirectory, git log prints paths relative to the
+// working-tree root. The root's .traceignore (and the subdirectory's own)
+// applies, pairs stay inside the subdirectory and paths are shown relative
+// to it.
+func TestCochangeInSubdirectoryHonorsPolicyAndScope(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			".traceignore":     "sub/secret.go\n",
+			"sub/.traceignore": "local.go\n",
+			"sub/a.go":         fmt.Sprintf("package s\nfunc A%d(){}\n", i),
+			"sub/b.go":         fmt.Sprintf("package s\nfunc B%d(){}\n", i),
+			"sub/secret.go":    fmt.Sprintf("package s\nfunc S%d(){}\n", i),
+			"sub/local.go":     fmt.Sprintf("package s\nfunc L%d(){}\n", i),
+			"top.go":           fmt.Sprintf("package t\nfunc T%d(){}\n", i),
+		} {
+			if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, "sub"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "a.go" || pairs[0].B != "b.go" || pairs[0].Count != 2 {
+		t.Fatalf("subdirectory pairs: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range pairs {
+		got = append(got, p.A+"+"+p.B)
+	}
+	if text := strings.Join(got, " "); strings.Contains(text, "secret.go") || !strings.Contains(text, "sub/a.go+sub/b.go") || !strings.Contains(text, "sub/local.go") {
+		t.Fatalf("root pairs: %s", text)
+	}
+}

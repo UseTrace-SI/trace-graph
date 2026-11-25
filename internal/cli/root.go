@@ -311,15 +311,17 @@ func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxByte
 	if maxCount < 1 || maxCount > 1000 || maxPairs < 1 || maxPairs > 100000 || maxBytes < 1024 || maxBytes > 64<<20 {
 		return nil, fmt.Errorf("max-count must be 1-1000, max-pairs 1-100000 and max-log-bytes 1024-67108864")
 	}
-	// The same policy as capture: built-in secret exclusions and .traceignore.
-	pairable, err := graph.CochangeFilter(repo)
+	// The same policy as capture: built-in secret exclusions and
+	// .traceignore. Git prints paths relative to the working-tree root, and
+	// --repo may select a subdirectory of it.
+	scope, err := graph.CochangeScope(ctx, repo)
 	if err != nil {
 		return nil, err
 	}
 	// Stream a bounded log instead of loading all history into memory. The
 	// isolated invocation cannot be redirected to another repository by
 	// ambient GIT_* variables and never fetches missing objects.
-	gitcmd := graph.LocalGitCommand(ctx, repo, "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount))
+	gitcmd := graph.LocalGitCommand(ctx, repo, "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount), "--", ".")
 	pipe, err := gitcmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -374,10 +376,11 @@ func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxByte
 			flush()
 			continue
 		}
-		if !pairable(line) || len(current) >= maxFilesPerCommit {
+		rel, ok := scope(line)
+		if !ok || len(current) >= maxFilesPerCommit {
 			continue
 		}
-		current = append(current, line)
+		current = append(current, rel)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("reading git log: %w", err)

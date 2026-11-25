@@ -84,7 +84,9 @@ them without the 64-character hash, as `<file>:<name>:<line>`; `impact`,
 All analysis and inspection commands remain repository-scoped. `cochange` pairs
 indexable sources and common configuration files (YAML, JSON, TOML, INI,
 XML, Dockerfiles, Makefiles, Terraform, Gradle, Bazel), with the secret and
-generated-state exclusions of indexing and the project's `.traceignore`,
+generated-state exclusions of indexing and the `.traceignore` of the Git
+working-tree root (and of `--repo` when it is a subdirectory, whose history
+and paths it is then limited to),
 without lockfiles or Terraform variable files, scans at most
 `--max-count` commits, and refuses to exceed `--max-pairs` unique file pairs or
 `--max-log-bytes`. It reads the log NUL-delimited, so non-ASCII and

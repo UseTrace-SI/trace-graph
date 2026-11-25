@@ -50,6 +50,41 @@ func CochangeFilter(root string) (func(string) bool, error) {
 	}, nil
 }
 
+// CochangeScope maps the paths git log prints for a checkout (relative to
+// the Git working-tree root) to paths relative to repo, which may be a
+// subdirectory, and reports whether cochange pairs them: the path must lie
+// under repo, pass CochangeFile and neither the working-tree root's
+// .traceignore nor, for a subdirectory, repo's own .traceignore (the one
+// indexing reads) may exclude it.
+func CochangeScope(ctx context.Context, repo string) (func(gitPath string) (string, bool), error) {
+	out, err := revisionOutput(ctx, repo, 8192, "rev-parse", "--show-toplevel", "--show-prefix")
+	if err != nil {
+		return nil, fmt.Errorf("locating the Git working tree: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	top, prefix := lines[0], ""
+	if len(lines) > 1 {
+		prefix = filepath.ToSlash(lines[1])
+	}
+	topPolicy, err := CochangeFilter(top)
+	if err != nil {
+		return nil, err
+	}
+	subPolicy := func(string) bool { return false }
+	if prefix != "" {
+		if subPolicy, err = projectExclusions(repo); err != nil {
+			return nil, err
+		}
+	}
+	return func(gitPath string) (string, bool) {
+		rel, under := strings.CutPrefix(gitPath, prefix)
+		if !under || rel == "" || !topPolicy(gitPath) || subPolicy(rel) {
+			return "", false
+		}
+		return rel, true
+	}, nil
+}
+
 func pathBase(slashed string) string {
 	if i := strings.LastIndexByte(slashed, '/'); i >= 0 {
 		return slashed[i+1:]
