@@ -70,9 +70,10 @@ var buildManifests = []string{"package.json", "Cargo.toml", "pyproject.toml", "s
 // outputFilter reports build output, virtual environments and minified
 // bundles of a directory walked without Git. A Git checkout leaves them to
 // .gitignore, but a directory without Git has no ignore file, so walking it
-// would index generated code. dist/, build/ and target/ are output only at
-// the walk root or beside a build manifest; deeper directories of those
-// names are often real packages. .venv/ is skipped anywhere.
+// would index generated code. dist/, build/ and target/ are output only
+// beside a build manifest, at the root or deeper; elsewhere directories of
+// those names are often real packages (GOROOT/src/cmd/dist, go/build).
+// .venv/ is skipped anywhere.
 type outputFilter struct {
 	root      string
 	manifests map[string]bool
@@ -93,9 +94,6 @@ func (o *outputFilter) excluded(rel string, dir bool) bool {
 }
 
 func (o *outputFilter) hasManifest(dir string) bool {
-	if dir == "." {
-		return true
-	}
 	if found, ok := o.manifests[dir]; ok {
 		return found
 	}
