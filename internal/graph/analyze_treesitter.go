@@ -89,8 +89,8 @@ func tsDeclarationName(node *ts.Node) *ts.Node {
 	return nil
 }
 
-func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, error) {
-	db.namespace = rel
+func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error) {
+	out.namespace = rel
 	n := 0
 	lang := tsLangs[strings.ToLower(filepathExt(rel))]
 	parser := ts.NewParser()
@@ -120,9 +120,8 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 				symKind = "type"
 			}
 			id := rel + ":" + name + ":" + itoa(line)
-			db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-				id, repo, rel, name, symKind, line, kind+" "+name)
-			db.content(repo, id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
+			out.symbol(id, name, symKind, line, kind+" "+name)
+			out.content(id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
 			n++
 			// calls within: find call_expression children
 			var findCalls func(n *ts.Node)
@@ -144,7 +143,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 						if idx := strings.LastIndex(callee, "."); idx >= 0 {
 							callee = callee[idx+1:]
 						}
-						db.call(repo, rel, id, name, callee, int(n.StartPosition().Row)+1, int(n.StartPosition().Column)+1, "unresolved")
+						out.call(id, name, callee, int(n.StartPosition().Row)+1, int(n.StartPosition().Column)+1, "unresolved")
 					}
 				}
 				for i := uint(0); i < n.ChildCount(); i++ {
@@ -162,7 +161,7 @@ func analyzeFile(repo, rel, path string, src []byte, db *indexWriter) (int, erro
 	// lexical containers, Tree-sitter symbols are never module-level targets,
 	// so these resolve to module files (and decorated Python handlers) only.
 	if lang := relationLanguage(rel); lang != "" {
-		writeLexRelations(lang, repo, rel, newLexSource(lang, string(src)), db, func(int) (string, string) { return "", "" }, nil)
+		writeLexRelations(lang, repo, rel, newLexSource(lang, string(src)), out, func(int) (string, string) { return "", "" }, nil)
 	}
 	return n, nil
 }

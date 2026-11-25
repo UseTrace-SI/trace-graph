@@ -846,7 +846,7 @@ func (s *lexSource) lineText(line int) string {
 // that contains an offset, or returns empty strings at module scope; local
 // (nil when unknown) reports a name bound by a function enclosing an offset.
 // A route handler bound that way is a parameter or local and never resolves.
-func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, enclosing func(int) (string, string), local func(int, string) bool) {
+func writeLexRelations(lang, repo, rel string, s *lexSource, out *fileBatch, enclosing func(int) (string, string), local func(int, string) bool) {
 	if lang == "" {
 		return
 	}
@@ -857,7 +857,7 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, en
 			to = imp.specifier
 		}
 		id := rel + "#import:" + itoa(line) + ":" + itoa(column) + ":" + imp.kind + ":" + imp.local + ":" + imp.imported
-		db.relation(repo, rel, id, "", rel, to, "import", line, strings.Join([]string{"leximport", lang, imp.specifier, imp.imported, imp.local, imp.kind}, "\x1f"))
+		out.relation(id, "", rel, to, "import", line, strings.Join([]string{"leximport", lang, imp.specifier, imp.imported, imp.local, imp.kind}, "\x1f"))
 	}
 	for _, route := range extractRoutes(lang, s) {
 		line, column := s.position(route.offset)
@@ -876,6 +876,6 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, db *indexWriter, en
 				hint = "lexlocal"
 			}
 		}
-		db.relation(repo, rel, id, fromID, route.method+" "+route.path, handler, "route", line, hint)
+		out.relation(id, fromID, route.method+" "+route.path, handler, "route", line, hint)
 	}
 }

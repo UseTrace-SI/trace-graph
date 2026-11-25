@@ -114,28 +114,27 @@ func wordSet(words string) map[string]bool {
 // lexDeclarationLanguage reports languages with declaration-aware analysis.
 func lexDeclarationLanguage(lang string) bool { _, ok := lexPatterns[lang]; return ok }
 
-func analyzeLexicalFile(lang, repo, rel, src string, db *indexWriter) (int, error) {
+func analyzeLexicalFile(lang, repo, rel, src string, out *fileBatch) (int, error) {
 	s := newLexSource(lang, src)
 	decls := lexDeclarations(lang, s)
 	// Hashes keep string literals: a literal-only edit is a source change.
 	hashText := maskSource(lang, src, true)
 	for _, d := range decls {
 		d.id = goSymbolID(rel, d.name, d.line)
-		db.namespace = lexNamespace(rel, d.container, d.static, d.exported)
-		db.Exec("INSERT OR REPLACE INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)",
-			d.id, repo, rel, d.name, d.kind, d.line, d.signature)
-		db.content(repo, d.id, lexContent(s, hashText, d), d.endLine)
+		out.namespace = lexNamespace(rel, d.container, d.static, d.exported)
+		out.symbol(d.id, d.name, d.kind, d.line, d.signature)
+		out.content(d.id, lexContent(s, hashText, d), d.endLine)
 	}
-	db.namespace = lexNamespace(rel, "", false, false)
+	out.namespace = lexNamespace(rel, "", false, false)
 	for _, d := range decls {
 		for _, super := range d.supers {
 			id := d.id + "->" + super.kind + ":" + super.qualifier + "." + super.name
-			db.relation(repo, rel, id, d.id, d.name, super.name, super.kind, d.line, "lextype\x1f"+super.qualifier)
+			out.relation(id, d.id, d.name, super.name, super.kind, d.line, "lextype\x1f"+super.qualifier)
 		}
 	}
 	for _, call := range lexCalls(lang, s, decls) {
 		line, column := s.position(call.offset)
-		db.relation(repo, rel, goRelationID(call.from.id, call.name, line, column), call.from.id, call.from.name, call.name, "call", line, call.hint)
+		out.relation(goRelationID(call.from.id, call.name, line, column), call.from.id, call.from.name, call.name, "call", line, call.hint)
 	}
 	var callables []*lexDecl
 	for _, d := range decls {
@@ -143,7 +142,7 @@ func analyzeLexicalFile(lang, repo, rel, src string, db *indexWriter) (int, erro
 			callables = append(callables, d)
 		}
 	}
-	writeLexRelations(lang, repo, rel, s, db, func(offset int) (string, string) {
+	writeLexRelations(lang, repo, rel, s, out, func(offset int) (string, string) {
 		if from := innermost(callables, offset); from != nil {
 			return from.id, from.name
 		}

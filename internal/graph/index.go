@@ -17,102 +17,6 @@ import (
 	"github.com/UseTrace-SI/trace-graph/internal/embed"
 )
 
-// indexWriter preserves the first database error, including writes made from
-// parser callbacks. The surrounding transaction is never committed on failure.
-type indexWriter struct {
-	tx             *sql.Tx
-	err            error
-	namespace      string
-	moduleOverride *string
-	maxRecords     int
-	records        int
-	symbolIDs      map[string]bool
-	// shapes collects rename evidence during revision analysis only.
-	shapes map[string]symbolShape
-}
-
-// write is the single counted write path. Symbol metadata rows must share the
-// observation cap with symbols and relations, otherwise the stated row budget
-// is exceeded roughly threefold by scopes, content and targets alone.
-func (w *indexWriter) write(query string, args ...any) (sql.Result, error) {
-	if w.err != nil {
-		return nil, w.err
-	}
-	if w.maxRecords > 0 && w.records >= w.maxRecords {
-		w.err = fmt.Errorf("analysis exceeds %d observation rows", w.maxRecords)
-		return nil, w.err
-	}
-	w.records++
-	r, err := w.tx.Exec(query, args...)
-	w.err = err
-	return r, err
-}
-
-func (w *indexWriter) Exec(query string, args ...any) (sql.Result, error) {
-	if w.err != nil {
-		return nil, w.err
-	}
-	// Every caller supplies (id, repo, ...). Assert the shape explicitly so a
-	// future query with a different argument order fails with a useful error
-	// instead of panicking or silently formatting a malformed scoped ID.
-	if len(args) < 2 {
-		w.err = fmt.Errorf("indexWriter.Exec: expected at least (id, repo) string arguments, got %d", len(args))
-		return nil, w.err
-	}
-	id, ok := args[0].(string)
-	if !ok {
-		w.err = fmt.Errorf("indexWriter.Exec: argument 0 (id) must be a string, got %T", args[0])
-		return nil, w.err
-	}
-	repo, ok := args[1].(string)
-	if !ok {
-		w.err = fmt.Errorf("indexWriter.Exec: argument 1 (repo) must be a string, got %T", args[1])
-		return nil, w.err
-	}
-	// Declaration identities are derived from file, name and line. Two
-	// same-name declarations on one line would silently overwrite each other
-	// (losing signature and receiver data and producing wrong edges), so reject
-	// collisions in every mode, not just revision comparisons.
-	if strings.Contains(query, "INTO symbols") {
-		if w.symbolIDs == nil {
-			w.symbolIDs = map[string]bool{}
-		}
-		if w.symbolIDs[id] {
-			w.err = fmt.Errorf("repository contains colliding declaration identities (%s); separate same-name declarations onto different lines", id)
-			return nil, w.err
-		}
-		w.symbolIDs[id] = true
-	}
-	// Symbol and relation IDs must be unique across repositories in one DB.
-	args[0] = scopedID(repo, id)
-	query = strings.Replace(query, "INSERT OR REPLACE", "INSERT", 1)
-	if strings.Contains(query, "INTO symbols") {
-		query += " ON CONFLICT(id) DO UPDATE SET signature=excluded.signature,kind=excluded.kind"
-	} else {
-		query += " ON CONFLICT(id) DO NOTHING"
-	}
-	r, err := w.write(query, args...)
-	if err != nil {
-		return r, err
-	}
-	if strings.Contains(query, "INTO symbols") {
-		_, w.err = w.write("INSERT INTO symbol_scopes(symbol_id,repo,namespace) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET namespace=excluded.namespace", args[0], args[1], w.namespace)
-	}
-	return r, w.err
-}
-
-func (w *indexWriter) content(repo, id string, src []byte, endLine int) {
-	if w.err != nil {
-		return
-	}
-	_, _ = w.write("INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line", scopedID(repo, id), fmt.Sprintf("%x", sha256.Sum256(src)), endLine)
-	if w.shapes != nil && w.err == nil {
-		if file, name := splitSymbolID(id); renameShapeLanguage(file) {
-			w.shapes[scopedID(repo, id)] = shapeOf(shapeLanguage(file), name, src)
-		}
-	}
-}
-
 func filepathExt(path string) string { return filepath.Ext(path) }
 
 // isIndexBusy recognizes SQLite writer contention as well as a caller deadline
@@ -189,6 +93,7 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	}
 	defer tx.Rollback()
 	w := &indexWriter{tx: tx}
+	defer w.close()
 	seen := map[string]bool{}
 	n, analyzed := 0, 0
 	var totalBytes int64
@@ -236,12 +141,13 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if err := removeFile(tx, root, rel); err != nil {
 			return err
 		}
-		count, err := analyzeFile(root, rel, path, src, w)
+		batch := w.batch(rel)
+		count, err := analyzeFile(root, rel, path, src, batch)
 		if err != nil {
 			return err
 		}
-		if w.err != nil {
-			return w.err
+		if err := w.flush(root, batch); err != nil {
+			return err
 		}
 		if _, err := tx.Exec("INSERT INTO file_cache_v2(repo,path,digest) VALUES(?,?,?)", root, rel, digest); err != nil {
 			return err
