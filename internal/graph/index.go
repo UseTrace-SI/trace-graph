@@ -191,12 +191,64 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 	// skipped by their stat key are read only if the pass runs.
 	var goSources []goSource
 	goBytes, goOverBudget := 0, false
+	// Sources are hashed and parsed by a bounded worker pool. Their batches
+	// are stored here, by this goroutine alone, in walk order, so a
+	// generation is identical to a sequential one.
+	pipeline := newIndexPipeline()
+	apply := func(job *indexJob) error {
+		addGoSource := func() {
+			if job.typeChecked && !goOverBudget {
+				goSources = append(goSources, goSource{rel: job.rel, src: job.src})
+			}
+		}
+		if job.unchanged {
+			if !job.cached.skipped {
+				addGoSource() // read later, only if the type pass runs
+			}
+			return nil
+		}
+		if job.err != nil {
+			return job.err
+		}
+		if job.identical {
+			// Touched but identical: remember the new stat key.
+			if !job.cached.skipped {
+				addGoSource()
+			}
+			if job.cached.stat == job.key {
+				return nil
+			}
+			_, err := tx.Exec("UPDATE file_cache_v2 SET stat=? WHERE repo=? AND path=?", nullable(job.key), root, job.rel)
+			return err
+		}
+		if err := removeFile(tx, root, job.rel); err != nil {
+			return err
+		}
+		var collision *collisionError
+		if err := w.flush(root, job.batch); errors.As(err, &collision) {
+			// The batch wrote nothing; the file stays out of this generation
+			// until its content changes.
+			if _, err := tx.Exec("INSERT INTO file_warnings(repo,path,warning) VALUES(?,?,?)", root, job.rel, collision.Error()); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else {
+			n += job.count
+			addGoSource()
+		}
+		if _, err := tx.Exec("INSERT INTO file_cache_v2(repo,path,digest,stat) VALUES(?,?,?,?)", root, job.rel, job.digest, nullable(job.key)); err != nil {
+			return err
+		}
+		analyzed++
+		return nil
+	}
 	err = walkSourcesContext(ctx, root, func(rel string, f *os.File) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		path := filepath.Join(root, rel)
-		rel = filepath.ToSlash(rel)
+		job := &indexJob{path: filepath.Join(root, rel), rel: filepath.ToSlash(rel)}
+		rel = job.rel
 		seen[rel] = true
 		if len(seen) > 100000 {
 			return fmt.Errorf("repository exceeds 100000 source files")
@@ -205,17 +257,16 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 		if err != nil {
 			return err
 		}
-		key := statKey(info, start)
-		cached, known := cache[rel]
-		unchanged := known && key != "" && cached.stat == key && strings.HasPrefix(cached.digest, digestPrefix)
-		var src []byte
+		job.key = statKey(info, start)
+		job.cached, job.known = cache[rel]
+		job.unchanged = job.known && job.key != "" && job.cached.stat == job.key && strings.HasPrefix(job.cached.digest, digestPrefix)
 		size := info.Size()
-		if !unchanged {
-			src, err = io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
+		if !job.unchanged {
+			job.src, err = io.ReadAll(io.LimitReader(f, 8*1024*1024+1))
 			if err != nil {
 				return err
 			}
-			size = int64(len(src))
+			size = int64(len(job.src))
 			read++
 		}
 		if size > 8*1024*1024 {
@@ -225,62 +276,20 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 		if totalBytes > 512*1024*1024 {
 			return fmt.Errorf("repository sources exceed 512 MiB")
 		}
-		typeChecked := goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go")
-		if typeChecked {
+		job.typeChecked = goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go")
+		if job.typeChecked {
 			if goBytes += int(size); goBytes > goTypeSourceBudget {
 				goOverBudget, goSources = true, nil
 			}
 		}
-		addGoSource := func() {
-			if typeChecked && !goOverBudget {
-				goSources = append(goSources, goSource{rel: rel, src: src})
-			}
+		if !job.unchanged {
+			pipeline.start(job, func() { job.analyze(root, w, digestPrefix) })
 		}
-		if unchanged {
-			if !cached.skipped {
-				addGoSource() // read later, only if the type pass runs
-			}
-			return nil
-		}
-		digest := fmt.Sprintf("%s%x", digestPrefix, sha256.Sum256(src))
-		if known && cached.digest == digest {
-			// Touched but identical: remember the new stat key.
-			if !cached.skipped {
-				addGoSource()
-			}
-			if cached.stat == key {
-				return nil
-			}
-			_, err := tx.Exec("UPDATE file_cache_v2 SET stat=? WHERE repo=? AND path=?", nullable(key), root, rel)
-			return err
-		}
-		if err := removeFile(tx, root, rel); err != nil {
-			return err
-		}
-		batch := w.batch(rel)
-		count, err := analyzeFile(root, rel, path, src, batch)
-		if err != nil {
-			return err
-		}
-		var collision *collisionError
-		if err := w.flush(root, batch); errors.As(err, &collision) {
-			// The batch wrote nothing; the file stays out of this generation
-			// until its content changes.
-			if _, err := tx.Exec("INSERT INTO file_warnings(repo,path,warning) VALUES(?,?,?)", root, rel, collision.Error()); err != nil {
-				return err
-			}
-		} else if err != nil {
-			return err
-		} else {
-			n += count
-			addGoSource()
-		}
-		if _, err := tx.Exec("INSERT INTO file_cache_v2(repo,path,digest,stat) VALUES(?,?,?,?)", root, rel, digest, nullable(key)); err != nil {
-			return err
-		}
-		analyzed++
-		return nil
+		return pipeline.push(job, apply)
 	})
+	if err == nil {
+		err = pipeline.drain(apply)
+	}
 	if err != nil {
 		return Report{}, fmt.Errorf("indexing repository: %w", err)
 	}
