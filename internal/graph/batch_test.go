@@ -161,6 +161,32 @@ func TestFileBatchPrefersDeclarationWithBody(t *testing.T) {
 		t.Fatalf("unknown body: kept %s", got)
 	}
 
+	// A declaration replaces a function expression recorded before it; a
+	// signature that replaced one is in turn replaced by its implementation.
+	b = (&indexWriter{}).batch("a.ts")
+	b.expression("a.ts:f:1", "f", "func", 1, "expression")
+	b.content("a.ts:f:1", []byte("expr"), 1)
+	b.call("a.ts:f:1", "f", "wrong", 1, 10, "unresolved")
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "signature", false, "")
+	b.symbolBody("a.ts:f:1", "f", "func", 1, "implementation", true, "")
+	b.content("a.ts:f:1", []byte("impl"), 1)
+	b.call("a.ts:f:1", "f", "right", 1, 40, "unresolved")
+	b.expression("a.ts:f:1", "f", "func", 1, "late expression")
+	b.call("a.ts:f:1", "f", "late", 1, 60, "unresolved")
+	if got, want := kept(b), "symbol:implementation content:"+hash("impl")+" call:right"; got != want {
+		t.Fatalf("expression first: kept %s, want %s", got, want)
+	}
+	if len(b.collisions) != 3 {
+		t.Fatalf("collisions: %v", b.collisions)
+	}
+	// Two expressions: the first is kept.
+	b = (&indexWriter{}).batch("a.ts")
+	b.expression("a.ts:f:1", "f", "func", 1, "first")
+	b.expression("a.ts:f:1", "f", "func", 1, "second")
+	if got := kept(b); got != "symbol:first" {
+		t.Fatalf("two expressions: kept %s", got)
+	}
+
 	// Dropped rows are never stored.
 	db, err := store.Open(":memory:")
 	if err != nil {

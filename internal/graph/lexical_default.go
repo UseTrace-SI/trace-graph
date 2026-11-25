@@ -246,55 +246,67 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 		if scope != nil && lang != "python" && depths[line-1] != scope.bodyDepth+1 {
 			scope = nil // nested deeper, for example inside a method body
 		}
-		for _, p := range lexPatterns[lang] {
-			m := p.re.FindStringSubmatchIndex(text)
-			if m == nil {
-				continue
+		// A JavaScript/TypeScript line without a declaration at its start
+		// may still declare a function after a statement that ends on it,
+		// as in `foo(function h() {}); export function h(a: any) { ... }`.
+		// Later statements are tried for function declarations only.
+		declared := false
+		for k := 0; k >= 0 && !declared; k = lexNextStatement(lang, text, k) {
+			seg, segStart, patterns := text[k:], start+k, lexPatterns[lang]
+			if k > 0 {
+				patterns = patterns[:1]
 			}
-			name := text[m[2]:m[3]]
-			if lexKeywords[lang][name] {
+			for _, p := range patterns {
+				m := p.re.FindStringSubmatchIndex(seg)
+				if m == nil {
+					continue
+				}
+				name := seg[m[2]:m[3]]
+				if lexKeywords[lang][name] {
+					break
+				}
+				if p.member && scope == nil {
+					continue // a method shape outside a class body is a call
+				}
+				if lang == "java" && p.member && !javaMethodShape(seg[:m[2]], name, scope.name) {
+					break
+				}
+				d := &lexDecl{name: name, kind: p.kind, offset: segStart, paramStart: segStart + m[3], line: line, callable: p.callable, scope: p.scope, signature: strings.TrimSpace(seg)}
+				d.exported = (lang == "javascript" || lang == "typescript") && jsExportedLine.MatchString(seg)
+				if scope != nil {
+					d.container = scope.name
+					switch {
+					case lang == "rust":
+						d.static = scope.kind == "impl"
+					default:
+						d.static = lexStaticWord.MatchString(seg[:m[2]])
+					}
+				}
+				if enclosing != nil && enclosing.callable && (scope == nil || enclosing.bodyStart > scope.bodyStart) {
+					d.container, d.static = lexLocalContainer, false
+				}
+				if lang == "python" {
+					pyBody(s, d, line)
+				} else {
+					lexBody(lang, s, d, segStart+m[3])
+					if d.callable && d.bodyStart < 0 && (lang == "javascript" || lang == "typescript") {
+						lexOverloadBody(lang, s, d, seg, segStart, m[3])
+					}
+				}
+				d.supers = lexHeritage(lang, seg, m[3])
+				key := d.name + "\x00" + strconv.Itoa(d.line)
+				if seen[key] {
+					break // one identity per name and line
+				}
+				seen[key] = true
+				decls = append(decls, d)
+				if d.scope {
+					scopes = append(scopes, d)
+				}
+				push(d)
+				declared = true
 				break
 			}
-			if p.member && scope == nil {
-				continue // a method shape outside a class body is a call
-			}
-			if lang == "java" && p.member && !javaMethodShape(text[:m[2]], name, scope.name) {
-				break
-			}
-			d := &lexDecl{name: name, kind: p.kind, offset: start, paramStart: start + m[3], line: line, callable: p.callable, scope: p.scope, signature: strings.TrimSpace(text)}
-			d.exported = (lang == "javascript" || lang == "typescript") && jsExportedLine.MatchString(text)
-			if scope != nil {
-				d.container = scope.name
-				switch {
-				case lang == "rust":
-					d.static = scope.kind == "impl"
-				default:
-					d.static = lexStaticWord.MatchString(text[:m[2]])
-				}
-			}
-			if enclosing != nil && enclosing.callable && (scope == nil || enclosing.bodyStart > scope.bodyStart) {
-				d.container, d.static = lexLocalContainer, false
-			}
-			if lang == "python" {
-				pyBody(s, d, line)
-			} else {
-				lexBody(lang, s, d, start+m[3])
-				if d.callable && d.bodyStart < 0 && (lang == "javascript" || lang == "typescript") {
-					lexOverloadBody(lang, s, d, text, start, m[3])
-				}
-			}
-			d.supers = lexHeritage(lang, text, m[3])
-			key := d.name + "\x00" + strconv.Itoa(d.line)
-			if seen[key] {
-				break // one identity per name and line
-			}
-			seen[key] = true
-			decls = append(decls, d)
-			if d.scope {
-				scopes = append(scopes, d)
-			}
-			push(d)
-			break
 		}
 	}
 	if lang == "javascript" || lang == "typescript" {
@@ -475,6 +487,47 @@ func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, 
 			return
 		}
 	}
+}
+
+// lexNextStatement returns the offset after the next `;` or `}` of a
+// JavaScript/TypeScript line, from offset from, that ends a statement at the
+// nesting level the line starts at and is followed by a word that can start
+// a function declaration, or -1. Offset from is at that level, so successive
+// calls scan the line once.
+func lexNextStatement(lang, text string, from int) int {
+	if lang != "javascript" && lang != "typescript" {
+		return -1
+	}
+	depth := 0
+	for i := from; i < len(text); i++ {
+		switch text[i] {
+		case '{', '(', '[':
+			depth++
+			continue
+		case ')', ']':
+			if depth--; depth < 0 {
+				return -1
+			}
+			continue
+		case '}':
+			if depth--; depth < 0 {
+				return -1
+			}
+		case ';':
+		default:
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		next := strings.TrimLeft(text[i+1:], " \t")
+		for _, word := range []string{"function", "export", "default", "declare", "async"} {
+			if strings.HasPrefix(next, word) {
+				return i + 1
+			}
+		}
+	}
+	return -1
 }
 
 // lexStatementStart reports whether masked code ending in before leaves the

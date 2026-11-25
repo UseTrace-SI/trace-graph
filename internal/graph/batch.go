@@ -49,10 +49,12 @@ type fileBatch struct {
 	rows           []observation
 	ids            map[string]bool
 	// starts holds the row of each kept declaration; bodyless marks kept
-	// declarations the parser reported without a body (overload signatures).
-	starts   map[string]int
-	bodyless map[string]bool
-	scopes   map[string]string
+	// declarations the parser reported without a body (overload signatures)
+	// and expressions those recorded from a named function expression.
+	starts      map[string]int
+	bodyless    map[string]bool
+	expressions map[string]bool
+	scopes      map[string]string
 	// strict batches fail on colliding identities (revision comparisons);
 	// others drop the later declaration, see symbol.
 	strict bool
@@ -88,6 +90,17 @@ func (b *fileBatch) symbol(id, name, kind string, line int, signature string) {
 	b.declare(id, name, kind, line, signature, false, false, "")
 }
 
+// expression records a named function expression (`foo(function h() {})`),
+// which a later same-identity declaration replaces: the declaration is the
+// symbol other code refers to, and keeping it does not depend on whether
+// the expression comes before it on the line or after it.
+func (b *fileBatch) expression(id, name, kind string, line int, signature string) {
+	b.declare(id, name, kind, line, signature, false, false, "")
+	if b.err == nil && b.dropping != id {
+		b.expressions[id] = true
+	}
+}
+
 // symbolBody records a declaration, whether it has a body and the scope it
 // is declared in (any key that is equal for siblings, such as the parent
 // node). Only a sibling can be the implementation of an overload signature.
@@ -102,14 +115,15 @@ func (b *fileBatch) symbolBody(id, name, kind string, line int, signature string
 // records a declaration's content, receiver and calls right after the
 // declaration itself. The first is kept, unless the parser reported it
 // bodyless and a later sibling with a body (a one-line TypeScript overload
-// signature and its implementation): then the implementation replaces it.
-// Declaration-aware lexical analysis never yields duplicates.
+// signature and its implementation), or recorded it from a function
+// expression and the later one is a declaration: then the later one
+// replaces it. Declaration-aware lexical analysis never yields duplicates.
 func (b *fileBatch) declare(id, name, kind string, line int, signature string, bodyKnown, hasBody bool, scope string) {
 	if b.err != nil {
 		return
 	}
 	if b.ids == nil {
-		b.ids, b.starts, b.bodyless, b.scopes = map[string]bool{}, map[string]int{}, map[string]bool{}, map[string]string{}
+		b.ids, b.starts, b.bodyless, b.expressions, b.scopes = map[string]bool{}, map[string]int{}, map[string]bool{}, map[string]bool{}, map[string]string{}
 	}
 	if b.ids[id] {
 		if b.strict {
@@ -117,11 +131,12 @@ func (b *fileBatch) declare(id, name, kind string, line int, signature string, b
 			return
 		}
 		b.collisions = append(b.collisions, id)
-		if !(bodyKnown && hasBody && b.bodyless[id] && b.scopes[id] == scope) {
+		implementation := bodyKnown && hasBody && b.bodyless[id] && b.scopes[id] == scope
+		if !implementation && !(bodyKnown && b.expressions[id]) {
 			b.dropping = id
 			return
 		}
-		// Drop the bodyless declaration's rows: its symbol up to the next
+		// Drop the replaced declaration's rows: its symbol up to the next
 		// declaration.
 		for i := b.starts[id]; i < len(b.rows); i++ {
 			if i > b.starts[id] && b.rows[i].symbolKind != "" { // a symbol row, kept or dropped
@@ -134,6 +149,7 @@ func (b *fileBatch) declare(id, name, kind string, line int, signature string, b
 	b.ids[id] = true
 	b.starts[id] = len(b.rows)
 	b.bodyless[id] = bodyKnown && !hasBody
+	b.expressions[id] = false
 	b.scopes[id] = scope
 	b.rows = append(b.rows, observation{kind: observeSymbol, id: id, namespace: b.namespace, name: name, symbolKind: kind, line: line, signature: signature})
 }

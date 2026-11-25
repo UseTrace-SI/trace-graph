@@ -155,6 +155,10 @@ func TestOneLineOverloadIgnoresOtherSameNamedFunctions(t *testing.T) {
 		{"argument", "export function h(a: string): void; foo(function h() { wrong() }); export function h(a: any) { right(a) }\n"},
 		{"iife", "function h(a: string): void; (function h() { wrong() })(); function h(a: any) { right(a) }\n"},
 		{"nested", "function h(a: string): void; function outer() { function h() { wrong() } } function h(a: any) { right(a) }\n"},
+		// The function expression comes first: the later declarations
+		// still win.
+		{"expression-first", "foo(function h() { wrong() }); export function h(a: string): void; export function h(a: any) { right(a) }\n"},
+		{"generator-first", "foo(function* h() { wrong() }); export function h(a: string): void; export function h(a: any) { right(a) }\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, err := filepath.EvalSymlinks(t.TempDir())

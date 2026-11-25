@@ -128,7 +128,7 @@ Default database paths are anchored to `--repo`. New initialized Trace projects 
 
 Git checkouts index tracked and untracked non-ignored sources. Generated Trace state, dependency trees (including Yarn Plug'n'Play loaders `.pnp.cjs`, `.pnp.loader.mjs`, `.pnp.js`) and secret paths are excluded even if tracked. Secret paths follow the Trace CLI's built-in list and its path folding (case-insensitive, `\` as a separator, a leading `./` and invisible zero-width or bidirectional control characters ignored): `.aws/` and `.ssh/` directories, `.env*`, `*.pem`, `*.key` and default SSH key names in any path element, and by file name `credentials.json`, `service-account*.json`, `kubeconfig`, `kubeconfig.yaml`, `kubeconfig.yml`, `*.kubeconfig`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `.pgpass`, `*.tfstate[.backup]`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `.kube/config` and `.docker/config.json`. Non-Git source directories remain supported; without a `.gitignore` they also skip `.venv/` directories and `*.min.js` bundles anywhere, and `dist/`, `build/` and `target/` directories beside a build manifest (`package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pom.xml`, `build.gradle[.kts]`), at the root or deeper; elsewhere directories with those names, such as `go/build` or `cmd/dist`, are indexed. `node_modules/` is excluded everywhere, as before. Newly ignored files are removed on the next successful generation.
 
-Two same-named declarations on one line (typical of minified or macro-heavy code) share a file/name/line identity. Instead of failing the whole index, the first is kept and later ones are dropped together with their content, receivers and relationships, and the file gets a recorded warning: `analyze` prints it to stderr, `refresh` lists it in `file_warnings`, and `health` reports `files_with_warnings` and up to 20 `file_warnings`. The file's Go code stays out of the type pass (its package counts as incomplete) until its content changes. Revision comparisons still refuse such files.
+Two same-named declarations on one line (typical of minified or macro-heavy code) share a file/name/line identity. Instead of failing the whole index, the first is kept and later ones are dropped together with their content, receivers and relationships (except that a TypeScript overload signature yields to a sibling implementation, and a named function expression to a later declaration), and the file gets a recorded warning: `analyze` prints it to stderr, `refresh` lists it in `file_warnings`, and `health` reports `files_with_warnings` and up to 20 `file_warnings`. The file's Go code stays out of the type pass (its package counts as incomplete) until its content changes. Revision comparisons still refuse such files.
 
 Every Git command Graph runs (indexing, `cochange`, `compare`) drops ambient `GIT_*` variables, so a hook's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` or `GIT_CONFIG_*` cannot redirect it to another repository, index or configuration, and runs with `core.fsmonitor` disabled, lazy fetches prohibited, replacement objects ignored and optional locks off. Source reads are anchored to the repository root: a source beneath a directory that was replaced by a symlink is skipped (Git treats it as deleted), an open cannot leave the root, does not block on a FIFO and must yield the regular file that was checked.
 
@@ -203,7 +203,13 @@ analysis of masked source (comments, strings and JavaScript regular
 expression literals blanked per language; it is not a type checker).
 Declarations get extents and containers, so source hashes cover whole bodies
 (comments masked, whitespace collapsed, literals kept), and calls are
-attributed to the innermost enclosing function. Imports
+attributed to the innermost enclosing function. A JavaScript/TypeScript line
+declares its first function even after statements that end on it
+(`foo(function h() {}); export function h(a: any) { ... }`), and a one-line
+overload signature takes the body of a sibling implementation on its line.
+Known limitation: these same-line checks count brackets in masked source, so
+a regular expression the masking does not recognize, or template-literal or
+JSX text holding `)` or `}`, can hide such a declaration or implementation. Imports
 resolve to repository files: relative JS/TS specifiers (including `./x.js`
 for a `./x.ts` source), Python relative and unique absolute modules, Rust
 `crate::`/`self::`/`super::` paths and `mod` files, and Java class files.

@@ -361,3 +361,33 @@ func TestLexicalOverloadRejectsNonSiblingCandidates(t *testing.T) {
 		t.Fatal("sibling implementation after export default async not found")
 	}
 }
+
+// A function declared after a statement that ends on its line is a
+// declaration of that line; function expressions, and declarations behind
+// an unclosed or closing bracket, are not.
+func TestLexicalDeclarationAfterStatementOnItsLine(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"foo(function h() { wrong() }); export function h(a: string): void; export function h(a: any) { right(a) }\n", "h"},
+		{"import x from './x'; export function g() { x() }\n", "g"},
+		{"if (a) { b() } async function g() {}\n", "g"},
+		{"foo(function h() { wrong() });\n", ""},
+		{"foo(a, function h() {});\n", ""},
+		{"}); function g() {}\n", ""},
+		{"foo(a; function g() {})\n", ""},
+		{"x = function g() {}; y()\n", ""},
+	} {
+		decls := lexDeclarations("typescript", newLexSource("typescript", tc.src))
+		var names []string
+		for _, d := range decls {
+			names = append(names, d.name)
+		}
+		if got := strings.Join(names, " "); got != tc.want {
+			t.Errorf("%q declared %q, want %q", tc.src, got, tc.want)
+		}
+	}
+	src := "foo(function h() { wrong() }); export function h(a: string): void; export function h(a: any) { right(a) }\n"
+	decls := lexDeclarations("typescript", newLexSource("typescript", src))
+	if len(decls) != 1 || !decls[0].exported || decls[0].bodyStart < strings.Index(src, "any") || decls[0].bodyStart > strings.Index(src, "right") || decls[0].offset != strings.Index(src, " export") {
+		t.Fatalf("declaration after a statement: %+v", decls)
+	}
+}

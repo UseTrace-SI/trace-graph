@@ -153,8 +153,9 @@ func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error
 			id := rel + ":" + name + ":" + strconv.Itoa(line)
 			if kind == "function_expression" || kind == "generator_function" {
 				// A named function expression is never the implementation
-				// of a same-named overload signature: keep the first.
-				out.symbol(id, name, symKind, line, kind+" "+name)
+				// of a same-named overload signature, and a same-named
+				// declaration replaces it.
+				out.expression(id, name, symKind, line, kind+" "+name)
 			} else {
 				out.symbolBody(id, name, symKind, line, kind+" "+name, node.ChildByFieldName("body") != nil, tsScope(node))
 			}
