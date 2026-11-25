@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -135,12 +136,64 @@ CREATE TABLE IF NOT EXISTS file_warnings(repo TEXT NOT NULL,path TEXT NOT NULL,w
 			}
 		}
 	}
+	// Created after the migrations, which add the terms column to an older
+	// index; see FillSearchTerms.
+	if _, err := tx.Exec("CREATE INDEX IF NOT EXISTS symbols_missing_terms ON symbols(repo) WHERE terms IS NULL"); err != nil {
+		return err
+	}
 	if version < SchemaVersion {
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion)); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// FillSearchTerms computes the split identifier words of symbols stored
+// without them, in one repository or, when repo is empty, in all. Older
+// binaries keep writing symbols without words into a newer index, so every
+// analysis fills them; the symbols_missing_terms partial index keeps the
+// lookup cheap when nothing is missing. The update triggers keep the search
+// index consistent once it exists.
+func FillSearchTerms(ctx context.Context, tx *sql.Tx, repo string) (int, error) {
+	query, args := "SELECT rowid,name FROM symbols WHERE terms IS NULL", []any{}
+	if repo != "" {
+		query += " AND repo=?"
+		args = append(args, repo)
+	}
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	type row struct {
+		rowid int64
+		name  string
+	}
+	var pending []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.rowid, &r.name); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		pending = append(pending, r)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil || len(pending) == 0 {
+		return 0, err
+	}
+	update, err := tx.PrepareContext(ctx, "UPDATE symbols SET terms=? WHERE rowid=?")
+	if err != nil {
+		return 0, err
+	}
+	defer update.Close()
+	for _, r := range pending {
+		if _, err := update.Exec(ident.Terms(r.name), r.rowid); err != nil {
+			return 0, err
+		}
+	}
+	return len(pending), nil
 }
 
 // SchemaVersion is the user_version of a fully migrated index. Read-only
@@ -183,37 +236,8 @@ func migrateSearchTerms(tx *sql.Tx) error {
 			return err
 		}
 	}
-	rows, err := tx.Query("SELECT rowid,name FROM symbols WHERE terms IS NULL")
-	if err != nil {
+	if _, err := FillSearchTerms(context.Background(), tx, ""); err != nil {
 		return err
-	}
-	type row struct {
-		rowid int64
-		name  string
-	}
-	var pending []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.rowid, &r.name); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, r)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	update, err := tx.Prepare("UPDATE symbols SET terms=? WHERE rowid=?")
-	if err != nil {
-		return err
-	}
-	defer update.Close()
-	for _, r := range pending {
-		if _, err := update.Exec(ident.Terms(r.name), r.rowid); err != nil {
-			return err
-		}
 	}
 	if _, err := tx.Exec(searchSchema + "INSERT INTO symbol_fts(symbol_fts) VALUES('rebuild');"); err != nil {
 		return err

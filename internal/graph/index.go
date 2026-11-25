@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/UseTrace-SI/trace-graph/internal/embed"
+	"github.com/UseTrace-SI/trace-graph/internal/store"
 )
 
 func filepathExt(path string) string { return filepath.Ext(path) }
@@ -327,6 +328,11 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 		if _, err := tx.ExecContext(ctx, "INSERT INTO repo_go_dirs(repo,digest) VALUES(?,?) ON CONFLICT(repo) DO UPDATE SET digest=excluded.digest", root, dirDigest); err != nil {
 			return Report{}, err
 		}
+	}
+	// Symbols written by an older binary into this index have no split
+	// identifier words yet.
+	if _, err := store.FillSearchTerms(ctx, tx, root); err != nil {
+		return Report{}, err
 	}
 	symRows, err := tx.QueryContext(ctx, "SELECT s.id,s.file,s.name,COALESCE(s.signature,'') FROM symbols s LEFT JOIN symbol_embeddings e ON e.symbol_id=s.id WHERE s.repo=? AND e.symbol_id IS NULL", root)
 	if err != nil {

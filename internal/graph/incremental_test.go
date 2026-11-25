@@ -275,3 +275,41 @@ func mustStat(t *testing.T, path string) fs.FileInfo {
 	}
 	return info
 }
+
+// A binary from before schema 4 writes symbols without split identifier
+// words into a newer index (it does not migrate an index it finds current).
+// The next analysis fills them, so search by word finds those symbols.
+func TestAnalysisFillsSearchTermsWrittenByOlderBinaries(t *testing.T) {
+	r := newIncrementalRepo(t, map[string]string{"a.go": "package p\nfunc Present() {}\n"})
+	r.analyze()
+	// What an older binary's insert looks like: no terms column.
+	if _, err := r.db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,'old.go','AnalyzeRepoContext','func',1,'func AnalyzeRepoContext()')", ScopedID(r.root, "old.go:AnalyzeRepoContext:1"), r.root); err != nil {
+		t.Fatal(err)
+	}
+	search := func() int {
+		t.Helper()
+		s, ok, err := store.NewSymbolSearch("context", store.SchemaVersion)
+		if err != nil || !ok {
+			t.Fatal(err)
+		}
+		var n int
+		if err := r.db.QueryRow("SELECT count(*) FROM symbols s JOIN symbol_fts ON symbol_fts.rowid=s.rowid WHERE symbol_fts MATCH ? AND s.repo=?", s.Match, r.root).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	if search() != 0 {
+		t.Fatal("split word found before the words were filled")
+	}
+	r.analyze() // nothing changed on disk
+	var missing int
+	if err := r.db.QueryRow("SELECT count(*) FROM symbols WHERE terms IS NULL").Scan(&missing); err != nil || missing != 0 {
+		t.Fatalf("%d symbols without words: %v", missing, err)
+	}
+	if search() != 1 {
+		t.Fatal("filled words are not searchable")
+	}
+	if _, err := r.db.Exec("INSERT INTO symbol_fts(symbol_fts) VALUES('integrity-check')"); err != nil {
+		t.Fatalf("search index inconsistent: %v", err)
+	}
+}
