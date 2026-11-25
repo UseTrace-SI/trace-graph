@@ -222,8 +222,8 @@ func TestCochangeFileExcludesSecretPaths(t *testing.T) {
 		if CochangeFile(rel) {
 			t.Errorf("secret path paired: %s", rel)
 		}
-		if InspectableSource(rel) {
-			t.Errorf("secret path inspectable: %s", rel)
+		if !excludedSource(rel) {
+			t.Errorf("secret path not excluded: %s", rel)
 		}
 	}
 	for _, rel := range []string{
@@ -254,5 +254,59 @@ func TestCochangeFilterHonorsTraceignore(t *testing.T) {
 		if got := pairable(rel); got != want {
 			t.Errorf("%s: %v, want %v", rel, got, want)
 		}
+	}
+}
+
+// Indexing used to match exclusions case-sensitively while cochange and
+// revisions lowercased first, so .SSH/helper.go or .Env.Production.ts were
+// indexed. excludedSource folds paths itself, like the Trace CLI.
+func TestExcludedSourceFoldsPaths(t *testing.T) {
+	for _, rel := range []string{
+		".SSH/helper.go", "ID_RSA_tools/x.go", "Keys.PEM/x.go", ".Aws/creds.py", ".Env.Production.ts",
+		`.ssh\helper.go`, `sub\.AWS\x.py`, "./.ssh/helper.go", ".s\u200dsh/x.go",
+		"\u202e.env.ts", "cred\ufeffentials.json", "NODE_MODULES/x/index.js", "./Vendor/x.go",
+	} {
+		if !excludedSource(rel) {
+			t.Errorf("not excluded: %q", rel)
+		}
+	}
+	for _, rel := range []string{"ssh/helper.go", "pkg/keys/x.go", "envoy/x.go", "cmd/main.go"} {
+		if excludedSource(rel) {
+			t.Errorf("excluded: %q", rel)
+		}
+	}
+	root := t.TempDir()
+	for _, rel := range []string{".SSH/helper.go", "ID_RSA_tools/x.go", "Keys.PEM/x.go", ".Aws/creds.py", ".Env.Production.ts", "keep.go"} {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("package p\nfunc F(){}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := store.Open(filepath.Join(t.TempDir(), "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := AnalyzeRepo(root, db); err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	rows, err := db.Query("SELECT path FROM file_cache_v2 ORDER BY path")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, p)
+	}
+	if strings.Join(files, ",") != "keep.go" {
+		t.Fatalf("indexed %v", files)
 	}
 }

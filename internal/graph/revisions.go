@@ -340,7 +340,7 @@ func PrepareRevisionPair(ctx context.Context, root, base, head string) (*Revisio
 		sum.Write(digest[:])
 	}
 	return &RevisionPair{BaseCommit: baseID, HeadCommit: headID, PolicyHash: fmt.Sprintf("%x", sum.Sum(nil)), root: canonical, base: before, head: after, excluded: func(file string) bool {
-		return excludedSource(strings.ToLower(file)) || ignoreCurrent(file) || before.excluded(file) || after.excluded(file)
+		return excludedSource(file) || ignoreCurrent(file) || before.excluded(file) || after.excluded(file)
 	}}, nil
 }
 

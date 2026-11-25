@@ -79,7 +79,4 @@ func TestHeaderModuleAndConfigurationExtensions(t *testing.T) {
 	if err := db.QueryRow("SELECT COUNT(*) FROM file_cache_v2 WHERE path LIKE '%.y%ml'").Scan(&yaml); err != nil || yaml != 0 {
 		t.Fatalf("YAML indexed: %d %v", yaml, err)
 	}
-	if InspectableSource("ci.yml") || !InspectableSource("include/api.h") {
-		t.Fatal("inspection policy differs from indexing")
-	}
 }

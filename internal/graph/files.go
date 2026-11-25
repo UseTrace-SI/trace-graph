@@ -9,13 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unicode"
 )
-
-// InspectableSource applies the same file policy as indexing. Read-only
-// inspection commands use it so derived context never mentions excluded paths.
-func InspectableSource(rel string) bool {
-	return supportedFile(strings.ToLower(filepath.Ext(rel))) && !excludedSource(strings.ToLower(rel))
-}
 
 // cochangeConfigExts and cochangeConfigNames are configuration files whose
 // history is worth pairing with sources even though they are not indexed.
@@ -32,11 +27,10 @@ var (
 // Terraform, ...). The secret and generated-state exclusions of indexing
 // apply. CochangeFilter also applies the project's .traceignore.
 func CochangeFile(rel string) bool {
-	lower := strings.ToLower(filepath.ToSlash(rel))
-	if excludedSource(lower) {
+	if excludedSource(rel) {
 		return false
 	}
-	base := pathBase(lower)
+	base := pathBase(foldPath(rel))
 	if cochangeLockfiles[base] {
 		return false
 	}
@@ -77,11 +71,29 @@ var (
 	sshKeyPrefixes = []string{"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 )
 
+// foldPath normalizes a repository-relative path for policy matching like
+// the Trace CLI (internal/manifest foldPath and SecretPath): backslashes are
+// separators, a leading ./ is dropped, case is folded (case-insensitive file
+// systems resolve .SSH to .ssh) and zero-width and bidirectional control
+// code points, which render invisibly, are removed.
+func foldPath(rel string) string {
+	rel = strings.TrimPrefix(strings.ReplaceAll(rel, "\\", "/"), "./")
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == 0x200c || r == 0x200d || r == 0x200e || r == 0x200f, r >= 0x202a && r <= 0x202e,
+			r >= 0x206a && r <= 0x206f, r == 0xfeff:
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, rel)
+}
+
 // excludedSource reports generated Trace state, dependency trees and secret
-// paths for a lowercased repository-relative path. Indexing, inspection,
-// revision comparison and cochange share it, even for tracked files.
+// paths for a repository-relative path in any case or separator form.
+// Indexing, revision comparison and cochange share it, even for tracked
+// files.
 func excludedSource(rel string) bool {
-	rel = filepath.ToSlash(rel)
+	rel = foldPath(filepath.ToSlash(rel))
 	for _, part := range strings.Split(rel, "/") {
 		switch part {
 		case ".git", ".trace", ".trace-brain", ".trace-graph", ".aws", ".ssh", "node_modules", "vendor":
