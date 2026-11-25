@@ -89,7 +89,7 @@ func TestTransitiveImpactIdentityCyclesLimitsAndIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = db.Exec("INSERT INTO symbols VALUES(?,?,?,?,?,?,?)", "duplicate", repo, "dup.go", "A", "func", 1, "func A()")
+	_, err = db.Exec("INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?)", "duplicate", repo, "dup.go", "A", "func", 1, "func A()")
 	db.Close()
 	if err != nil {
 		t.Fatal(err)

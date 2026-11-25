@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+
+	"github.com/UseTrace-SI/trace-graph/internal/ident"
 )
 
 type observationKind uint8
@@ -130,7 +132,7 @@ func (w *indexWriter) batch(rel string) *fileBatch {
 }
 
 const (
-	insertSymbol         = "INSERT INTO symbols(id,repo,file,name,kind,line,signature) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET signature=excluded.signature,kind=excluded.kind"
+	insertSymbol         = "INSERT INTO symbols(id,repo,file,name,kind,line,signature,terms) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET signature=excluded.signature,kind=excluded.kind"
 	insertSymbolScope    = "INSERT INTO symbol_scopes(symbol_id,repo,namespace) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET namespace=excluded.namespace"
 	insertSymbolContent  = "INSERT INTO symbol_content(symbol_id,source_hash,end_line) VALUES(?,?,?) ON CONFLICT(symbol_id) DO UPDATE SET source_hash=excluded.source_hash,end_line=excluded.end_line"
 	insertSymbolReceiver = "INSERT INTO symbol_receivers(symbol_id,receiver) VALUES(?,?) ON CONFLICT(symbol_id) DO UPDATE SET receiver=excluded.receiver"
@@ -180,7 +182,7 @@ func (w *indexWriter) flush(repo string, b *fileBatch) error {
 		id := prefix + o.id
 		switch o.kind {
 		case observeSymbol:
-			w.write(insertSymbol, id, repo, b.rel, o.name, o.symbolKind, o.line, o.signature)
+			w.write(insertSymbol, id, repo, b.rel, o.name, o.symbolKind, o.line, o.signature, ident.Terms(o.name))
 			w.write(insertSymbolScope, id, repo, o.namespace)
 		case observeContent:
 			w.write(insertSymbolContent, id, o.hash, o.endLine)

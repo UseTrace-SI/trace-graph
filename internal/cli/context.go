@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/UseTrace-SI/trace-graph/internal/embed"
 	"github.com/UseTrace-SI/trace-graph/internal/graph"
@@ -114,14 +113,6 @@ func contextCmd() *cobra.Command {
 		if limit <= 0 || limit > 50 {
 			limit = 20
 		}
-		words := strings.FieldsFunc(query, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsNumber(r) && r != '_' })
-		if len(words) > 16 {
-			words = words[:16]
-		}
-		for i := range words {
-			words[i] = `"` + words[i] + `"`
-		}
-		useFTS := len(words) > 0
 		if semantic && strings.TrimSpace(query) != "" {
 			// Bound the SQL scan so a large index cannot require decoding every
 			// embedding under the same deadline. Results are best-effort when
@@ -187,44 +178,40 @@ func contextCmd() *cobra.Command {
 				out.Symbols = append(out.Symbols, cands[i].item)
 			}
 		} else {
-			q := `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048) FROM symbols s`
-			var args []any
-			if useFTS {
-				// FTS and path filters are applied together; a supplied --path
-				// must not silently discard --query.
-				q += ` JOIN symbol_fts f ON f.rowid=s.rowid WHERE symbol_fts MATCH ? AND s.repo=?`
-				args = append(args, strings.Join(words, " OR "), repoPath)
-			} else {
-				q += ` WHERE s.repo=?`
-				args = append(args, repoPath)
-			}
-			if path != "" {
-				q += ` AND s.file=?`
-				args = append(args, path)
-			}
-			if useFTS {
-				q += ` ORDER BY bm25(symbol_fts),s.file,s.line,s.id LIMIT ?`
-			} else {
-				q += ` ORDER BY s.file,s.line,s.id LIMIT ?`
-			}
-			args = append(args, limit)
-			rows, err := db.QueryContext(cmd.Context(), q, args...)
+			// FTS and path filters are applied together; a supplied --path
+			// must not silently discard --query.
+			symbols, ok, err := searchSymbols(cmd.Context(), db, repoPath, query, path, limit)
 			if err != nil {
 				return err
 			}
-			for rows.Next() {
-				var item codeSymbol
-				if err := rows.Scan(&item.ID, &item.File, &item.Name, &item.Kind, &item.Line, &item.Signature); err != nil {
-					rows.Close()
+			if !ok {
+				q := `SELECT s.id,s.file,s.name,s.kind,s.line,substr(COALESCE(s.signature,''),1,2048) FROM symbols s WHERE s.repo=?`
+				args := []any{repoPath}
+				if path != "" {
+					q += ` AND s.file=?`
+					args = append(args, path)
+				}
+				q += ` ORDER BY s.file,s.line,s.id LIMIT ?`
+				args = append(args, limit)
+				rows, err := db.QueryContext(cmd.Context(), q, args...)
+				if err != nil {
 					return err
 				}
-				out.Symbols = append(out.Symbols, item)
+				for rows.Next() {
+					var item codeSymbol
+					if err := rows.Scan(&item.ID, &item.File, &item.Name, &item.Kind, &item.Line, &item.Signature); err != nil {
+						rows.Close()
+						return err
+					}
+					symbols = append(symbols, item)
+				}
+				err = rows.Err()
+				rows.Close()
+				if err != nil {
+					return err
+				}
 			}
-			err = rows.Err()
-			rows.Close()
-			if err != nil {
-				return err
-			}
+			out.Symbols = append(out.Symbols, symbols...)
 		}
 		// Include callers and outgoing relationships for the selected symbols.
 		if cmd.Context().Err() == nil && len(out.Symbols) > 0 {

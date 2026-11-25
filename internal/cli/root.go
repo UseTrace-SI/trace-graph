@@ -131,29 +131,23 @@ func symbolsCmd() *cobra.Command {
 
 func queryCmd() *cobra.Command {
 	return &cobra.Command{Use: "query", Args: cobra.MinimumNArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
-		q, err := store.LiteralQuery(strings.Join(args, " "))
-		if err != nil {
-			return err
+		text := strings.Join(args, " ")
+		if len(text) > 4096 {
+			return fmt.Errorf("query exceeds 4096 bytes")
 		}
 		db, err := readIndex()
 		if err != nil {
 			return err
 		}
 		defer db.Close()
-		rows, err := db.Query("SELECT s.file,s.name,s.kind,s.line FROM symbols s JOIN symbol_fts f ON f.rowid=s.rowid WHERE symbol_fts MATCH ? AND s.repo=? ORDER BY s.file,s.line", q, repoPath)
+		symbols, _, err := searchSymbols(cmd.Context(), db, repoPath, text, "", 0)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var file, name, kind string
-			var line int
-			if err := rows.Scan(&file, &name, &kind, &line); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  %s  %s\n", file, line, kind, name)
+		for _, s := range symbols {
+			fmt.Fprintf(cmd.OutOrStdout(), "%s:%d  %s  %s\n", s.File, s.Line, s.Kind, s.Name)
 		}
-		return rows.Err()
+		return nil
 	}}
 }
 

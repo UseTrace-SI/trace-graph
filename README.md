@@ -19,7 +19,12 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
 - `trace-graph version` — print the coordinated bundle version.
 - `trace-graph analyze [--repo .]` — index the current checkout in place.
 - `trace-graph symbols` — list indexed symbols as `file:line kind name`.
-- `trace-graph query <term>` — literal-word FTS search across symbols.
+- `trace-graph query <term>` — ranked symbol search. Words match name
+  prefixes and split identifier words (`analyze` finds `AnalyzeRepo` and
+  `analyzeFile`; `repo` finds `AnalyzeRepoContext`; `http` finds
+  `parse_http_request`) as well as literal signature words. An exact name
+  ranks first, then names starting with a word, then BM25 with names
+  weighted over split words over signatures.
 - `trace-graph neighbors <symbol-or-id>` — show definitions and direct callers (calls and interface dispatch).
 - `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--limit 200] [--include-dispatch] [--json]` — transitive resolved-call report.
 - `trace-graph health` — index time, coverage, resolved/unresolved call counts, call resolution, relationship kinds and the Go type pass as JSON.
@@ -66,7 +71,7 @@ Tree-sitter vet, race tests, and 100-run regressions are also included.
 
 ## Production bounds
 
-Ordinary search text is interpreted as literal words, including punctuation. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. Local embeddings are hashed word projections rather than a learned semantic model.
+Ordinary search text is interpreted as literal words, including punctuation; FTS operators are never interpreted. Identifiers are split at camelCase, snake_case and letter/digit boundaries (`HTTPServer` → `HTTP Server`, `utf8Decode` → `utf 8 Decode`) when a symbol is written. Index schema 4 adds these words to an existing index in place on the next `analyze`/`refresh`; until then read-only lookups fall back to name prefixes. Context queries have a two-second deadline and keep at most 50 ranked candidates in memory. Local embeddings are hashed word projections rather than a learned semantic model.
 
 Indexing has a one-minute deadline, an 8 MiB limit per source file, a 512 MiB total source limit, and a 100,000-file limit. Git path listings are capped at 4 MiB. Limit failures preserve the previous index generation. Valid bodyless Go declarations remain symbols without body traversal. Removed symbols cascade to embeddings; existing orphan embeddings are cleaned on upgrade. Unchanged symbol embeddings are reused. Per-file relation deletes use a `(repo, file)` index, so a cold index grows with the repository rather than with files × relations.
 
