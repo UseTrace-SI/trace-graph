@@ -391,3 +391,29 @@ func TestLexicalDeclarationAfterStatementOnItsLine(t *testing.T) {
 		t.Fatalf("declaration after a statement: %+v", decls)
 	}
 }
+
+// `function` must be followed by whitespace or `*` before the declared name:
+// functionCall() is a call, not a declaration of Call.
+func TestLexicalFunctionKeywordNeedsSeparator(t *testing.T) {
+	for src, want := range map[string]string{
+		"functionCall();\n":             "",
+		"a(); functionCall();\n":        "",
+		"function* gen() {}\n":          "gen",
+		"function*gen() {}\n":           "gen",
+		"async function\tf() {}\n":      "f",
+		"a(); export function g() {}\n": "g",
+	} {
+		var names []string
+		for _, d := range lexDeclarations("javascript", newLexSource("javascript", src)) {
+			names = append(names, d.name)
+		}
+		if got := strings.Join(names, " "); got != want {
+			t.Errorf("%q declared %q, want %q", src, got, want)
+		}
+	}
+	src := "function h(a: string): void; functionh(() => { wrong() }); function h(a: any) { right(a) }\n"
+	decls := lexDeclarations("typescript", newLexSource("typescript", src))
+	if len(decls) != 1 || decls[0].bodyStart < strings.Index(src, "wrong") {
+		t.Fatalf("overload implementation after functionh(): %+v", decls)
+	}
+}

@@ -50,7 +50,7 @@ const (
 )
 
 var jsPatterns = []lexPattern{
-	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)`), kind: "func", callable: true},
+	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?function(?:\s+|\s*\*\s*)([A-Za-z_$][\w$]*)`), kind: "func", callable: true},
 	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)`), kind: "type", scope: true},
 	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:declare\s+)?interface\s+([A-Za-z_$][\w$]*)`), kind: "type"},
 	{re: regexp.MustCompile(`^\s*(?:export\s+)?(?:declare\s+)?(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)`), kind: "type"},
@@ -471,7 +471,7 @@ func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, 
 	if !strings.Contains(rest, "function") {
 		return
 	}
-	later := regexp.MustCompile(`\bfunction\s*\*?\s*` + regexp.QuoteMeta(d.name))
+	later := regexp.MustCompile(`\bfunction(?:\s+|\s*\*\s*)` + regexp.QuoteMeta(d.name))
 	for _, m := range later.FindAllStringIndex(rest, -1) {
 		if m[1] < len(rest) && (rest[m[1]] >= 0x80 || lexIdentByte(rest[m[1]], true)) {
 			continue // a longer name
