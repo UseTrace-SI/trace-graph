@@ -48,7 +48,8 @@ func newMCPServer(repo, db string) *mcp.Server {
 		"Returns up to limit symbols (1-50, default 20) with file, line, kind, signature and an ID usable with graph_neighbors and graph_impact."}, s.search)
 	mcp.AddTool(server, &mcp.Tool{Name: "graph_def", Annotations: readOnly("Symbol definitions"), Description: "List every definition of an exact symbol name with its file, line, kind and signature (overloads and same-named symbols in different files are all listed). " +
 		"At most limit definitions (1-50, default 20)."}, s.def)
-	mcp.AddTool(server, &mcp.Tool{Name: "graph_neighbors", Annotations: readOnly("Direct callers"), Description: "Show the definitions of a symbol (exact name or ID) and its direct callers: call sites resolved to it, interface dispatch sites, and unresolved calls of the same name. " +
+	mcp.AddTool(server, &mcp.Tool{Name: "graph_neighbors", Annotations: readOnly("Direct callers"), Description: "Show the definitions of a symbol (exact name or ID) and its direct callers: call sites resolved to it and interface dispatch sites that may reach it. " +
+		"Unresolved calls are not guessed, so Tree-sitter builds (which do not resolve calls) list no callers. " +
 		"Each list holds at most limit entries (1-50, default 20). Use graph_impact for transitive callers or callees."}, s.neighbors)
 	mcp.AddTool(server, &mcp.Tool{Name: "graph_impact", Annotations: readOnly("Transitive impact"), Description: "Walk resolved call edges transitively from one symbol (exact name or ID; an ambiguous name is an error that asks for the ID). " +
 		"direction is callers (default: what breaks if it changes), callees (what it depends on) or both; depth 1-20 (default 3); limit 1-200 symbols (default 50); include_dispatch also follows interface dispatch to possible implementations. " +

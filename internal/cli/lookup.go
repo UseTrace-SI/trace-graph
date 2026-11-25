@@ -57,9 +57,9 @@ type neighborsResult struct {
 
 // lookupNeighbors lists the definitions of a symbol name or ID (with or
 // without the repository hash) and the
-// direct callers that reach them through resolved call and dispatch edges,
-// or through unresolved calls of the same name. A limit below 1 is
-// unbounded; it applies to each list.
+// direct callers that reach them through resolved call and dispatch edges
+// (or, for relations stored without a target record, calls of the same
+// name). A limit below 1 is unbounded; it applies to each list.
 func lookupNeighbors(ctx context.Context, db *sql.DB, repo, selector string, limit int) (neighborsResult, error) {
 	result := neighborsResult{Definitions: []codeSymbol{}, Callers: []callerRef{}}
 	scoped := graph.ScopedID(repo, selector)

@@ -98,6 +98,9 @@ func semanticSymbols(ctx context.Context, db *sql.DB, repo, query, path string, 
 		args = append(args, semanticCandidates)
 		rows, err := db.QueryContext(ctx, q, args...)
 		if err != nil {
+			if ctx.Err() != nil {
+				return []codeSymbol{}, nil
+			}
 			return nil, err
 		}
 		for rows.Next() {
