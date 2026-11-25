@@ -18,19 +18,36 @@ import (
 	tsts "github.com/tree-sitter/tree-sitter-typescript/bindings/go"
 )
 
-var tsLangs = map[string]*ts.Language{
-	".go":   ts.NewLanguage(tsgo.Language()),
-	".py":   ts.NewLanguage(tspy.Language()),
-	".js":   ts.NewLanguage(tsjs.Language()),
-	".ts":   ts.NewLanguage(tsts.LanguageTypescript()),
-	".tsx":  ts.NewLanguage(tsts.LanguageTSX()),
-	".rs":   ts.NewLanguage(tsrs.Language()),
-	".java": ts.NewLanguage(tsja.Language()),
-	".c":    ts.NewLanguage(tsc.Language()),
-	".cpp":  ts.NewLanguage(tscpp.Language()),
-	".cc":   ts.NewLanguage(tscpp.Language()),
-	".rb":   ts.NewLanguage(tsrb.Language()),
-}
+// tsLangs maps supported extensions to grammars. Headers (.h) may be C or
+// C++; the C++ grammar parses both.
+var tsLangs = func() map[string]*ts.Language {
+	javascript := ts.NewLanguage(tsjs.Language())
+	typescript := ts.NewLanguage(tsts.LanguageTypescript())
+	cpp := ts.NewLanguage(tscpp.Language())
+	return map[string]*ts.Language{
+		".go":   ts.NewLanguage(tsgo.Language()),
+		".py":   ts.NewLanguage(tspy.Language()),
+		".js":   javascript,
+		".jsx":  javascript,
+		".mjs":  javascript,
+		".cjs":  javascript,
+		".ts":   typescript,
+		".mts":  typescript,
+		".cts":  typescript,
+		".tsx":  ts.NewLanguage(tsts.LanguageTSX()),
+		".rs":   ts.NewLanguage(tsrs.Language()),
+		".java": ts.NewLanguage(tsja.Language()),
+		".c":    ts.NewLanguage(tsc.Language()),
+		".cpp":  cpp,
+		".cc":   cpp,
+		".cxx":  cpp,
+		".h":    cpp,
+		".hh":   cpp,
+		".hpp":  cpp,
+		".hxx":  cpp,
+		".rb":   ts.NewLanguage(tsrb.Language()),
+	}
+}()
 
 const analyzerVersion = "treesitter-v5"
 

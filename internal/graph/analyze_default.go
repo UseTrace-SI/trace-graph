@@ -14,6 +14,9 @@ import (
 	"strings"
 )
 
+// langExts maps supported source extensions to languages. Configuration
+// formats such as YAML are not sources: code-shaped regular expressions
+// only found false declarations in them.
 var langExts = map[string]string{
 	".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".mts": "typescript", ".cts": "typescript",
 	".go":     "go",
@@ -26,6 +29,11 @@ var langExts = map[string]string{
 	".c":      "c",
 	".cpp":    "cpp",
 	".cc":     "cpp",
+	".cxx":    "cpp",
+	".h":      "c",
+	".hh":     "cpp",
+	".hpp":    "cpp",
+	".hxx":    "cpp",
 	".rb":     "ruby",
 	".cs":     "csharp",
 	".kt":     "kotlin",
@@ -54,8 +62,6 @@ var langExts = map[string]string{
 	".m":      "objectivec",
 	".pl":     "perl",
 	".proto":  "protobuf",
-	".yaml":   "yaml",
-	".yml":    "yaml",
 	".zig":    "zig",
 }
 
