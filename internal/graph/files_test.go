@@ -207,3 +207,52 @@ func TestNonGitDirectoryWithoutManifestKeepsDistPackages(t *testing.T) {
 		t.Fatalf("symbols: %s", got)
 	}
 }
+
+// cochange lists paths, so it must never name credential files the Trace
+// CLI classifies as secrets; neither may indexing.
+func TestCochangeFileExcludesSecretPaths(t *testing.T) {
+	for _, rel := range []string{
+		"credentials.json", "config/Credentials.JSON", "deploy/service-account-prod.json",
+		"kubeconfig", "ops/kubeconfig.yaml", "ops/kubeconfig.yml", "ops/prod.kubeconfig",
+		".kube/config", "home/.docker/config.json", "infra/terraform.tfstate", "infra/terraform.tfstate.backup",
+		"certs/client.p12", "certs/client.pfx", "android/release.jks", "android/app.keystore",
+		".npmrc", "pkg/.pypirc", ".netrc", "_netrc", ".git-credentials", ".pgpass",
+		".aws/config", "x/.ssh/known_hosts", ".env.yaml", "keys/id_ed25519.pub", "tls/server.pem",
+	} {
+		if CochangeFile(rel) {
+			t.Errorf("secret path paired: %s", rel)
+		}
+		if InspectableSource(rel) {
+			t.Errorf("secret path inspectable: %s", rel)
+		}
+	}
+	for _, rel := range []string{
+		"deploy.yaml", "pkg/kubeconfig/loader.go", "config.json", "docker/config.json.go",
+		"infra/main.tf", "Dockerfile", "Makefile", "service.json", "internal/credentials/store.go",
+	} {
+		if !CochangeFile(rel) {
+			t.Errorf("ordinary path not paired: %s", rel)
+		}
+	}
+	for _, rel := range []string{"infra/prod.tfvars", "package-lock.json", "web/pnpm-lock.yaml", "src/packages.lock.json", "conda-lock.yml", "yarn.lock", "go.sum"} {
+		if CochangeFile(rel) {
+			t.Errorf("tfvars or lockfile paired: %s", rel)
+		}
+	}
+}
+
+func TestCochangeFilterHonorsTraceignore(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".traceignore"), []byte("private/\n*.secret.yaml\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pairable, err := CochangeFilter(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel, want := range map[string]bool{"a.go": true, "deploy.yaml": true, "private/a.go": false, "ops/db.secret.yaml": false} {
+		if got := pairable(rel); got != want {
+			t.Errorf("%s: %v, want %v", rel, got, want)
+		}
+	}
+}

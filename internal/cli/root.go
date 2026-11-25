@@ -311,6 +311,11 @@ func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxByte
 	if maxCount < 1 || maxCount > 1000 || maxPairs < 1 || maxPairs > 100000 || maxBytes < 1024 || maxBytes > 64<<20 {
 		return nil, fmt.Errorf("max-count must be 1-1000, max-pairs 1-100000 and max-log-bytes 1024-67108864")
 	}
+	// The same policy as capture: built-in secret exclusions and .traceignore.
+	pairable, err := graph.CochangeFilter(repo)
+	if err != nil {
+		return nil, err
+	}
 	// Stream a bounded log instead of loading all history into memory. The
 	// isolated invocation cannot be redirected to another repository by
 	// ambient GIT_* variables and never fetches missing objects.
@@ -369,7 +374,7 @@ func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxByte
 			flush()
 			continue
 		}
-		if !graph.CochangeFile(line) || len(current) >= maxFilesPerCommit {
+		if !pairable(line) || len(current) >= maxFilesPerCommit {
 			continue
 		}
 		current = append(current, line)

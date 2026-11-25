@@ -19,16 +19,18 @@ func InspectableSource(rel string) bool {
 
 // cochangeConfigExts and cochangeConfigNames are configuration files whose
 // history is worth pairing with sources even though they are not indexed.
+// Lockfiles change with every manifest edit and are left out (other
+// lockfiles, such as *.lock and go.sum, have no allowed extension).
 var (
-	cochangeConfigExts  = wordSetShared(".yaml .yml .json .toml .ini .cfg .conf .properties .xml .gradle .tf .tfvars .hcl .mk .cmake .bazel .bzl")
+	cochangeConfigExts  = wordSetShared(".yaml .yml .json .toml .ini .cfg .conf .properties .xml .gradle .tf .hcl .mk .cmake .bazel .bzl")
 	cochangeConfigNames = wordSetShared("dockerfile containerfile makefile gnumakefile jenkinsfile procfile cmakelists.txt build workspace go.mod")
-	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml cargo.lock poetry.lock pipfile.lock composer.lock gemfile.lock go.sum")
+	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json pnpm-lock.yaml packages.lock.json conda-lock.yml conda-lock.yaml")
 )
 
 // CochangeFile reports whether cochange pairs rel: indexable sources and
 // common configuration files (YAML, JSON, TOML, Dockerfiles, Makefiles,
 // Terraform, ...). The secret and generated-state exclusions of indexing
-// apply, and lockfiles, which change with every manifest edit, are left out.
+// apply. CochangeFilter also applies the project's .traceignore.
 func CochangeFile(rel string) bool {
 	lower := strings.ToLower(filepath.ToSlash(rel))
 	if excludedSource(lower) {
@@ -42,6 +44,18 @@ func CochangeFile(rel string) bool {
 	return supportedFile(ext) || cochangeConfigExts[ext] || cochangeConfigNames[base] || strings.HasPrefix(base, "dockerfile.")
 }
 
+// CochangeFilter returns CochangeFile restricted by the repository's
+// .traceignore, the policy capture and indexing honor.
+func CochangeFilter(root string) (func(string) bool, error) {
+	ignored, err := projectExclusions(root)
+	if err != nil {
+		return nil, err
+	}
+	return func(rel string) bool {
+		return CochangeFile(rel) && !ignored(filepath.ToSlash(rel))
+	}, nil
+}
+
 func pathBase(slashed string) string {
 	if i := strings.LastIndexByte(slashed, '/'); i >= 0 {
 		return slashed[i+1:]
@@ -49,13 +63,50 @@ func pathBase(slashed string) string {
 	return slashed
 }
 
+// Credential files, matching the Trace CLI's built-in secret paths
+// (internal/manifest SecretPath). Names and suffixes match a file's own name
+// only, so a directory such as pkg/kubeconfig/ is not excluded.
+var (
+	secretNames = wordSetShared(".npmrc .pypirc .netrc _netrc .git-credentials .pgpass credentials.json kubeconfig kubeconfig.yaml kubeconfig.yml")
+	// Certificate and key stores, Terraform state (it holds resource
+	// secrets) and kubeconfig files.
+	secretSuffixes = []string{".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfstate.backup", ".kubeconfig"}
+	// Files identified by their directory as well as their name.
+	secretFiles = []string{".kube/config", ".docker/config.json"}
+	// Default OpenSSH key names of every key type, with their .pub files.
+	sshKeyPrefixes = []string{"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
+)
+
+// excludedSource reports generated Trace state, dependency trees and secret
+// paths for a lowercased repository-relative path. Indexing, inspection,
+// revision comparison and cochange share it, even for tracked files.
 func excludedSource(rel string) bool {
-	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+	rel = filepath.ToSlash(rel)
+	for _, part := range strings.Split(rel, "/") {
 		switch part {
 		case ".git", ".trace", ".trace-brain", ".trace-graph", ".aws", ".ssh", "node_modules", "vendor":
 			return true
 		}
-		if strings.HasPrefix(part, ".env") || strings.HasPrefix(part, "id_rsa") || strings.HasSuffix(part, ".pem") || strings.HasSuffix(part, ".key") {
+		if strings.HasPrefix(part, ".env") || strings.HasSuffix(part, ".pem") || strings.HasSuffix(part, ".key") {
+			return true
+		}
+		for _, key := range sshKeyPrefixes {
+			if strings.HasPrefix(part, key) {
+				return true
+			}
+		}
+	}
+	base := pathBase(rel)
+	if secretNames[base] || (strings.HasPrefix(base, "service-account") && strings.HasSuffix(base, ".json")) {
+		return true
+	}
+	for _, suffix := range secretSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	for _, file := range secretFiles {
+		if rel == file || strings.HasSuffix(rel, "/"+file) {
 			return true
 		}
 	}

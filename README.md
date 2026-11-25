@@ -84,7 +84,8 @@ them without the 64-character hash, as `<file>:<name>:<line>`; `impact`,
 All analysis and inspection commands remain repository-scoped. `cochange` pairs
 indexable sources and common configuration files (YAML, JSON, TOML, INI,
 XML, Dockerfiles, Makefiles, Terraform, Gradle, Bazel), with the secret and
-generated-state exclusions of indexing and without lockfiles, scans at most
+generated-state exclusions of indexing and the project's `.traceignore`,
+without lockfiles or Terraform variable files, scans at most
 `--max-count` commits, and refuses to exceed `--max-pairs` unique file pairs or
 `--max-log-bytes`. It reads the log NUL-delimited, so non-ASCII and
 special-character paths are kept. `symbols`, `query`, `neighbors` and `def`
@@ -122,7 +123,7 @@ Example client configuration:
 
 Default database paths are anchored to `--repo`. New initialized Trace projects use `.trace/graph/graph.db`; pre-existing `.trace-graph/graph.db` is retained, and `--db` remains explicit. With the binary on the CLI daemon's `PATH`, Graph refreshes after completed turns/sessions and CLI recovery. `trace context` and MCP `get_context` include repository-scoped symbols, relationships, and index time. Lookup never creates an index. Graph analyzes the current checkout; derived databases are rebuilt locally.
 
-Git checkouts index tracked and untracked non-ignored sources. Generated Trace state, dependency trees and secret paths are excluded even if tracked. Non-Git source directories remain supported; without a `.gitignore` they also skip `.venv/` directories and `*.min.js` bundles anywhere, and `dist/`, `build/` and `target/` directories beside a build manifest (`package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pom.xml`, `build.gradle[.kts]`), at the root or deeper; elsewhere directories with those names, such as `go/build` or `cmd/dist`, are indexed. `node_modules/` is excluded everywhere, as before. Newly ignored files are removed on the next successful generation.
+Git checkouts index tracked and untracked non-ignored sources. Generated Trace state, dependency trees and secret paths are excluded even if tracked. Secret paths follow the Trace CLI's built-in list: `.aws/` and `.ssh/` directories, `.env*`, `*.pem`, `*.key` and default SSH key names in any path element, and by file name `credentials.json`, `service-account*.json`, `kubeconfig*`, `*.kubeconfig`, `.npmrc`, `.pypirc`, `.netrc`, `.git-credentials`, `.pgpass`, `*.tfstate[.backup]`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `.kube/config` and `.docker/config.json`. Non-Git source directories remain supported; without a `.gitignore` they also skip `.venv/` directories and `*.min.js` bundles anywhere, and `dist/`, `build/` and `target/` directories beside a build manifest (`package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pom.xml`, `build.gradle[.kts]`), at the root or deeper; elsewhere directories with those names, such as `go/build` or `cmd/dist`, are indexed. `node_modules/` is excluded everywhere, as before. Newly ignored files are removed on the next successful generation.
 
 Two same-named declarations on one line (typical of minified or macro-heavy code) share a file/name/line identity. Instead of failing the whole index, the first is kept and later ones are dropped together with their content, receivers and relationships, and the file gets a recorded warning: `analyze` prints it to stderr, `refresh` lists it in `file_warnings`, and `health` reports `files_with_warnings` and up to 20 `file_warnings`. The file's Go code stays out of the type pass (its package counts as incomplete) until its content changes. Revision comparisons still refuse such files.
 

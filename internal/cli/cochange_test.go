@@ -239,6 +239,13 @@ func TestCochangeIncludesConfigurationFiles(t *testing.T) {
 			"Dockerfile":        fmt.Sprintf("FROM scratch\n# %d\n", i),
 			"package-lock.json": fmt.Sprintf("{\"v\": %d}\n", i),
 			".env.yaml":         fmt.Sprintf("secret: %d\n", i),
+			// Credential files the Trace CLI classifies as secrets, and a
+			// .traceignored config, are never named.
+			"credentials.json":     fmt.Sprintf("{\"k\": %d}\n", i),
+			"service-account.json": fmt.Sprintf("{\"k\": %d}\n", i),
+			"kubeconfig.yaml":      fmt.Sprintf("token: %d\n", i),
+			"ignored.yaml":         fmt.Sprintf("x: %d\n", i),
+			".traceignore":         "ignored.yaml\n",
 		} {
 			if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0600); err != nil {
 				t.Fatal(err)
@@ -261,7 +268,9 @@ func TestCochangeIncludesConfigurationFiles(t *testing.T) {
 			t.Fatalf("missing %s in %s", want, text)
 		}
 	}
-	if strings.Contains(text, "package-lock.json") || strings.Contains(text, ".env") {
-		t.Fatalf("lockfile or secret path paired: %s", text)
+	for _, never := range []string{"package-lock.json", ".env", "credentials", "service-account", "kubeconfig", "ignored.yaml"} {
+		if strings.Contains(text, never) {
+			t.Fatalf("%s paired: %s", never, text)
+		}
 	}
 }
