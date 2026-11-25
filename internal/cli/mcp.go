@@ -57,7 +57,7 @@ func newMCPServer(repo, db string) *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{Name: "graph_context", Annotations: readOnly("Code context"), Description: "Read bounded code context: ranked symbols matching query words (all symbols when query is empty), optionally within one repository-relative path, with up to 50 relationships (calls, imports, routes, implements) touching them. " +
 		"semantic reranks candidates by local hashed-word embeddings of names, signatures and paths (not a learned model). limit is 1-50 symbols (default 20). " +
 		"status is ready, missing_index or needs_refresh; indexed_at is the index time in Unix milliseconds."}, s.context)
-	mcp.AddTool(server, &mcp.Tool{Name: "graph_cochange", Annotations: readOnly("Co-changing files"), Description: "List source file pairs that changed together in the same commits, most frequent first, from the last max_count commits of local Git history (1-1000, default 200). " +
+	mcp.AddTool(server, &mcp.Tool{Name: "graph_cochange", Annotations: readOnly("Co-changing files"), Description: "List file pairs (sources and configuration such as YAML, JSON, Dockerfiles) that changed together in the same commits, most frequent first, from the last max_count commits of local Git history (1-1000, default 200). " +
 		"Pairs changed together fewer than twice are omitted. Returns at most limit pairs (1-50, default 20). Requires a Git checkout; never fetches."}, s.cochange)
 	return server
 }

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -218,5 +219,49 @@ func TestRegressionCochangePairBudgetCountsUniquePairs(t *testing.T) {
 				t.Fatalf("got %v %q, want %q", err, &out, tc.want)
 			}
 		})
+	}
+}
+
+// Configuration files are not indexed, but their co-change history with
+// sources is useful: cochange pairs YAML, JSON, Dockerfiles and the like,
+// while secret paths and lockfiles stay out.
+func TestCochangeIncludesConfigurationFiles(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			"deploy.yaml":       fmt.Sprintf("replicas: %d\n", i),
+			"cfg.yml":           fmt.Sprintf("level: %d\n", i),
+			"m.go":              fmt.Sprintf("package m\nfunc M%d(){}\n", i),
+			"Dockerfile":        fmt.Sprintf("FROM scratch\n# %d\n", i),
+			"package-lock.json": fmt.Sprintf("{\"v\": %d}\n", i),
+			".env.yaml":         fmt.Sprintf("secret: %d\n", i),
+		} {
+			if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range pairs {
+		got = append(got, p.A+"+"+p.B)
+	}
+	text := strings.Join(got, " ")
+	for _, want := range []string{"cfg.yml+deploy.yaml", "deploy.yaml+m.go", "Dockerfile+m.go"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %s in %s", want, text)
+		}
+	}
+	if strings.Contains(text, "package-lock.json") || strings.Contains(text, ".env") {
+		t.Fatalf("lockfile or secret path paired: %s", text)
 	}
 }

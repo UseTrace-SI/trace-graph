@@ -17,6 +17,38 @@ func InspectableSource(rel string) bool {
 	return supportedFile(strings.ToLower(filepath.Ext(rel))) && !excludedSource(strings.ToLower(rel))
 }
 
+// cochangeConfigExts and cochangeConfigNames are configuration files whose
+// history is worth pairing with sources even though they are not indexed.
+var (
+	cochangeConfigExts  = wordSetShared(".yaml .yml .json .toml .ini .cfg .conf .properties .xml .gradle .tf .tfvars .hcl .mk .cmake .bazel .bzl")
+	cochangeConfigNames = wordSetShared("dockerfile containerfile makefile gnumakefile jenkinsfile procfile cmakelists.txt build workspace go.mod")
+	cochangeLockfiles   = wordSetShared("package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml cargo.lock poetry.lock pipfile.lock composer.lock gemfile.lock go.sum")
+)
+
+// CochangeFile reports paths co-change history pairs: indexable sources and
+// common configuration files (YAML, JSON, TOML, Dockerfiles, Makefiles,
+// Terraform, ...). The secret and generated-state exclusions of indexing
+// apply, and lockfiles, which change with every manifest edit, are left out.
+func CochangeFile(rel string) bool {
+	lower := strings.ToLower(filepath.ToSlash(rel))
+	if excludedSource(lower) {
+		return false
+	}
+	base := pathBase(lower)
+	if cochangeLockfiles[base] {
+		return false
+	}
+	ext := filepath.Ext(base)
+	return supportedFile(ext) || cochangeConfigExts[ext] || cochangeConfigNames[base] || strings.HasPrefix(base, "dockerfile.")
+}
+
+func pathBase(slashed string) string {
+	if i := strings.LastIndexByte(slashed, '/'); i >= 0 {
+		return slashed[i+1:]
+	}
+	return slashed
+}
+
 func excludedSource(rel string) bool {
 	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
 		switch part {

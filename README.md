@@ -81,8 +81,10 @@ them without the 64-character hash, as `<file>:<name>:<line>`; `impact`,
 `neighbors` and the MCP tools accept either form. `snapshot`, `changes` and
 `compare` keep the stored form.
 
-All analysis and inspection commands remain repository-scoped. `cochange` uses
-the same supported-file and exclusion policy as indexing, scans at most
+All analysis and inspection commands remain repository-scoped. `cochange` pairs
+indexable sources and common configuration files (YAML, JSON, TOML, INI,
+XML, Dockerfiles, Makefiles, Terraform, Gradle, Bazel), with the secret and
+generated-state exclusions of indexing and without lockfiles, scans at most
 `--max-count` commits, and refuses to exceed `--max-pairs` unique file pairs or
 `--max-log-bytes`. It reads the log NUL-delimited, so non-ASCII and
 special-character paths are kept. `symbols`, `query`, `neighbors` and `def`

@@ -369,7 +369,7 @@ func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxByte
 			flush()
 			continue
 		}
-		if !graph.InspectableSource(line) || len(current) >= maxFilesPerCommit {
+		if !graph.CochangeFile(line) || len(current) >= maxFilesPerCommit {
 			continue
 		}
 		current = append(current, line)
