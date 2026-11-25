@@ -102,6 +102,16 @@ func TestNonGitDirectoryExcludesBuildOutput(t *testing.T) {
 		"web/node_modules/m/index.js": "function dep(){}\n",
 		"web/vendor.min.js":           "function minified(){}\n",
 		"pkg/builder/b.go":            "package builder\nfunc Builder(){}\n",
+		// Deeper directories with those names are packages (go/build,
+		// cmd/dist) unless a build manifest sits beside them.
+		"internal/build/b.go":   "package build\nfunc InternalBuild(){}\n",
+		"cmd/dist/d.go":         "package main\nfunc CmdDist(){}\n",
+		"cmd/target/t.go":       "package target\nfunc CmdTarget(){}\n",
+		"web/package.json":      "{}\n",
+		"web/dist/app.js":       "function webDist(){}\n",
+		"crate/Cargo.toml":      "[package]\n",
+		"crate/target/gen.rs":   "fn crate_target(){}\n",
+		"py/sub/.venv/lib/x.py": "def nested_venv():\n    pass\n",
 	}
 	write := func(root string) {
 		for rel, content := range files {
@@ -140,7 +150,7 @@ func TestNonGitDirectoryExcludesBuildOutput(t *testing.T) {
 	}
 	plain := t.TempDir()
 	write(plain)
-	if got := strings.Join(names(plain), ","); got != "Builder,Keep,app" {
+	if got := strings.Join(names(plain), ","); got != "Builder,CmdDist,CmdTarget,InternalBuild,Keep,app" {
 		t.Fatalf("non-Git directory indexed build output: %s", got)
 	}
 	checkout := t.TempDir()

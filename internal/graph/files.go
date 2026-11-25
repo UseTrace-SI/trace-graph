@@ -30,20 +30,55 @@ func excludedSource(rel string) bool {
 	return false
 }
 
-// unversionedOutput reports build output, virtual environments and minified
-// bundles. A Git checkout leaves them to .gitignore (a tracked build/
-// directory can hold real sources), but a directory without Git has no
-// ignore file, so walking it would index generated code.
-func unversionedOutput(rel string, dir bool) bool {
+// buildManifests mark a directory whose dist/, build/ or target/ child is
+// that tool's output. go.mod is not one: Go packages are often named build
+// or dist (go/build, cmd/dist).
+var buildManifests = []string{"package.json", "Cargo.toml", "pyproject.toml", "setup.py", "setup.cfg", "pom.xml", "build.gradle", "build.gradle.kts"}
+
+// outputFilter reports build output, virtual environments and minified
+// bundles of a directory walked without Git. A Git checkout leaves them to
+// .gitignore, but a directory without Git has no ignore file, so walking it
+// would index generated code. dist/, build/ and target/ are output only at
+// the walk root or beside a build manifest; deeper directories of those
+// names are often real packages. .venv/ is skipped anywhere.
+type outputFilter struct {
+	root      string
+	manifests map[string]bool
+}
+
+func (o *outputFilter) excluded(rel string, dir bool) bool {
 	base := strings.ToLower(filepath.Base(rel))
-	if dir {
-		switch base {
-		case "dist", "build", "target", ".venv", "node_modules":
-			return true
-		}
-		return false
+	if !dir {
+		return strings.HasSuffix(base, ".min.js")
 	}
-	return strings.HasSuffix(base, ".min.js")
+	switch base {
+	case ".venv":
+		return true
+	case "dist", "build", "target":
+		return o.hasManifest(filepath.Dir(rel))
+	}
+	return false
+}
+
+func (o *outputFilter) hasManifest(dir string) bool {
+	if dir == "." {
+		return true
+	}
+	if found, ok := o.manifests[dir]; ok {
+		return found
+	}
+	found := false
+	for _, name := range buildManifests {
+		if info, err := os.Lstat(filepath.Join(o.root, dir, name)); err == nil && info.Mode().IsRegular() {
+			found = true
+			break
+		}
+	}
+	if o.manifests == nil {
+		o.manifests = map[string]bool{}
+	}
+	o.manifests[dir] = found
+	return found
 }
 
 // sourceVisitor receives a repository-relative path and the source opened
@@ -83,6 +118,7 @@ func walkSourcesContext(ctx context.Context, root string, visit sourceVisitor) e
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
+		output := &outputFilter{root: root}
 		if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -94,7 +130,7 @@ func walkSourcesContext(ctx context.Context, root string, visit sourceVisitor) e
 			if err != nil {
 				return err
 			}
-			if rel != "." && (excludedSource(rel) || unversionedOutput(rel, entry.IsDir()) || ignored(rel)) {
+			if rel != "." && (excludedSource(rel) || output.excluded(rel, entry.IsDir()) || ignored(rel)) {
 				if entry.IsDir() {
 					return filepath.SkipDir
 				}
