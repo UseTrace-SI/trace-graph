@@ -321,7 +321,11 @@ func cochangePairs(ctx context.Context, repo string, maxCount, maxPairs, maxByte
 	// Stream a bounded log instead of loading all history into memory. The
 	// isolated invocation cannot be redirected to another repository by
 	// ambient GIT_* variables and never fetches missing objects.
-	gitcmd := graph.LocalGitCommand(ctx, repo, "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount), "--", ".")
+	// diff.relative=true in the user's or repository's configuration would
+	// print paths relative to a subdirectory --repo instead of the
+	// working-tree root CochangeScope expects. Overriding the setting works
+	// with every Git release; --no-relative fails before Git 2.28.
+	gitcmd := graph.LocalGitCommand(ctx, repo, "-c", "diff.relative=false", "log", "-z", "--name-only", "--pretty=format:", "--max-count="+strconv.Itoa(maxCount), "--", ".")
 	pipe, err := gitcmd.StdoutPipe()
 	if err != nil {
 		return nil, err

@@ -324,3 +324,45 @@ func TestCochangeInSubdirectoryHonorsPolicyAndScope(t *testing.T) {
 		t.Fatalf("root pairs: %s", text)
 	}
 }
+
+// diff.relative=true makes git log print paths relative to the current
+// directory, which CochangeScope (expecting working-tree-root paths) then
+// rejected, so a subdirectory --repo returned nothing.
+func TestRegressionCochangeIgnoresDiffRelativeConfig(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareTestGit(t, root, "init", "-q")
+	compareTestGit(t, root, "config", "diff.relative", "true")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		for name, text := range map[string]string{
+			"sub/a.go": fmt.Sprintf("package s\nfunc A%d(){}\n", i),
+			"sub/b.go": fmt.Sprintf("package s\nfunc B%d(){}\n", i),
+			"top.go":   fmt.Sprintf("package t\nfunc T%d(){}\n", i),
+		} {
+			if err := os.WriteFile(filepath.Join(root, name), []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		compareTestGit(t, root, "add", "-A")
+		compareTestGit(t, root, "commit", "-qm", fmt.Sprintf("change %d", i))
+	}
+	pairs, err := cochangePairs(context.Background(), filepath.Join(root, "sub"), 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 1 || pairs[0].A != "a.go" || pairs[0].B != "b.go" || pairs[0].Count != 2 {
+		t.Fatalf("subdirectory pairs with diff.relative=true: %+v", pairs)
+	}
+	pairs, err = cochangePairs(context.Background(), root, 10, 1000, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pairs) != 3 {
+		t.Fatalf("root pairs with diff.relative=true: %+v", pairs)
+	}
+}

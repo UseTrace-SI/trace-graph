@@ -90,7 +90,8 @@ and paths it is then limited to),
 without lockfiles or Terraform variable files, scans at most
 `--max-count` commits, and refuses to exceed `--max-pairs` unique file pairs or
 `--max-log-bytes`. It reads the log NUL-delimited, so non-ASCII and
-special-character paths are kept. `symbols`, `query`, `neighbors` and `def`
+special-character paths are kept, and overrides `diff.relative`, so a
+configured relative diff cannot hide a subdirectory's history. `symbols`, `query`, `neighbors` and `def`
 open the index read-only like `health` and `impact`: they never create or
 migrate it and answer from the last committed generation while a refresh runs.
 
