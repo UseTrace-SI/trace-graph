@@ -456,8 +456,11 @@ func lexOverloadBody(lang string, s *lexSource, d *lexDecl, text string, start, 
 	if !strings.Contains(rest, "function") {
 		return
 	}
-	later := regexp.MustCompile(`\bfunction\s*\*?\s*` + regexp.QuoteMeta(d.name) + `\b`)
+	later := regexp.MustCompile(`\bfunction\s*\*?\s*` + regexp.QuoteMeta(d.name))
 	for _, m := range later.FindAllStringIndex(rest, -1) {
+		if m[1] < len(rest) && lexIdentByte(rest[m[1]], true) {
+			continue // a longer name
+		}
 		candidate := *d
 		lexBody(lang, s, &candidate, start+after+m[1])
 		if candidate.bodyStart >= 0 {

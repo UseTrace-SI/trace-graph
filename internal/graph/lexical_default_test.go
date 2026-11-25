@@ -321,3 +321,24 @@ func TestRegressionLexicalBindingsNeverGuess(t *testing.T) {
 		})
 	}
 }
+
+func TestLexicalOverloadTakesImplementationBodyOnItsLine(t *testing.T) {
+	for _, tc := range []struct {
+		src  string
+		body bool
+	}{
+		{"function f$(a: string): void; function f$(a: any) { g(a) }\n", true},
+		{"export function f(a: string): void; export function f(a: number): void; export function f(a: any) { g(a) }\n", true},
+		{"function fx(): void; function fxy() { g() }\n", false},
+		{"declare function h(): void;\n", false},
+	} {
+		s := newLexSource("typescript", tc.src)
+		decls := lexDeclarations("typescript", s)
+		if len(decls) == 0 {
+			t.Fatalf("%q: no declarations", tc.src)
+		}
+		if got := decls[0].bodyStart >= 0; got != tc.body {
+			t.Errorf("%q: body %v, want %v", tc.src, got, tc.body)
+		}
+	}
+}
