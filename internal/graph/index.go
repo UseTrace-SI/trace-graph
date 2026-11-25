@@ -62,16 +62,91 @@ func AnalyzeRepo(repo string, db *sql.DB) (int, error) {
 	return AnalyzeRepoContext(context.Background(), repo, db)
 }
 
+// AnalyzeRepoContext indexes a repository and returns the number of symbols
+// written by this generation.
 func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Minute)
-	defer cancel()
+	report, err := AnalyzeRepoReport(ctx, repo, db)
+	return report.Symbols, err
+}
+
+// FileWarning names a source file the index leaves out and why.
+type FileWarning struct {
+	Path    string `json:"path"`
+	Warning string `json:"warning"`
+}
+
+// Report summarizes a committed generation.
+type Report struct {
+	// Symbols counts the symbols written by this generation.
+	Symbols int
+	// Skipped lists every source currently left out of the index.
+	Skipped []FileWarning
+}
+
+// maxReportedWarnings bounds the skipped files listed in a Report.
+const maxReportedWarnings = 100
+
+// AnalyzeRepoReport is AnalyzeRepoContext with the files the generation
+// skipped. A source whose declarations cannot be given distinct identities
+// (two same-named declarations on one line, typical of minified code) is
+// skipped with a recorded warning rather than failing the whole index; it is
+// analyzed again once its content changes.
+func AnalyzeRepoReport(ctx context.Context, repo string, db *sql.DB) (Report, error) {
+	n, err := analyzeRepo(ctx, repo, db)
+	if err != nil {
+		return Report{}, err
+	}
+	report := Report{Symbols: n, Skipped: []FileWarning{}}
+	root, err := canonicalRoot(repo)
+	if err != nil {
+		return Report{}, err
+	}
+	report.Skipped, err = FileWarnings(ctx, db, root, maxReportedWarnings)
+	return report, err
+}
+
+// FileWarnings lists at most limit skipped sources of a repository in path
+// order. An index without the warnings table has none.
+func FileWarnings(ctx context.Context, db interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, repo string, limit int) ([]FileWarning, error) {
+	warnings := []FileWarning{}
+	rows, err := db.QueryContext(ctx, "SELECT path,warning FROM file_warnings WHERE repo=? ORDER BY path LIMIT ?", repo, limit)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return warnings, nil
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var w FileWarning
+		if err := rows.Scan(&w.Path, &w.Warning); err != nil {
+			return nil, err
+		}
+		warnings = append(warnings, w)
+	}
+	return warnings, rows.Err()
+}
+
+func canonicalRoot(repo string) (string, error) {
 	root, err := filepath.Abs(repo)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
-		return 0, fmt.Errorf("resolving repository: %w", err)
+		return "", fmt.Errorf("resolving repository: %w", err)
+	}
+	return root, nil
+}
+
+func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	root, err := canonicalRoot(repo)
+	if err != nil {
+		return 0, err
 	}
 	info, err := os.Stat(root)
 	if err != nil {
@@ -97,9 +172,14 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 	seen := map[string]bool{}
 	n, analyzed := 0, 0
 	var totalBytes int64
-	// Every Go file, cached or not, takes part in package-wide type checking.
+	// Every Go file, cached or not, takes part in package-wide type checking,
+	// except skipped files, whose declarations are not in the index.
 	var goSources []goSource
 	goBytes, goOverBudget := 0, false
+	skipped, err := warnedFiles(ctx, tx, root)
+	if err != nil {
+		return 0, err
+	}
 	err = walkSourcesContext(ctx, root, func(rel string, f *os.File) error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -121,10 +201,14 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if totalBytes > 512*1024*1024 {
 			return fmt.Errorf("repository sources exceed 512 MiB")
 		}
-		if goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go") {
+		typeChecked := goTypesEnabled && strings.EqualFold(filepath.Ext(rel), ".go")
+		if typeChecked {
 			if goBytes += len(src); goBytes > goTypeSourceBudget {
 				goOverBudget, goSources = true, nil
-			} else if !goOverBudget {
+			}
+		}
+		addGoSource := func() {
+			if typeChecked && !goOverBudget {
 				goSources = append(goSources, goSource{rel: rel, src: src})
 			}
 		}
@@ -136,6 +220,9 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 			return err
 		}
 		if old == digest {
+			if !skipped[rel] {
+				addGoSource()
+			}
 			return nil
 		}
 		if err := removeFile(tx, root, rel); err != nil {
@@ -146,13 +233,22 @@ func AnalyzeRepoContext(ctx context.Context, repo string, db *sql.DB) (int, erro
 		if err != nil {
 			return err
 		}
-		if err := w.flush(root, batch); err != nil {
+		var collision *collisionError
+		if err := w.flush(root, batch); errors.As(err, &collision) {
+			// The batch wrote nothing; the file stays out of this generation
+			// until its content changes.
+			if _, err := tx.Exec("INSERT INTO file_warnings(repo,path,warning) VALUES(?,?,?)", root, rel, collision.Error()); err != nil {
+				return err
+			}
+		} else if err != nil {
 			return err
+		} else {
+			n += count
+			addGoSource()
 		}
 		if _, err := tx.Exec("INSERT INTO file_cache_v2(repo,path,digest) VALUES(?,?,?)", root, rel, digest); err != nil {
 			return err
 		}
-		n += count
 		analyzed++
 		return nil
 	})
@@ -274,10 +370,28 @@ func resolveRepository(ctx context.Context, tx *sql.Tx, root string, changed boo
 	return err
 }
 
+// warnedFiles returns the skipped sources of the previous generation.
+func warnedFiles(ctx context.Context, tx *sql.Tx, repo string) (map[string]bool, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT path FROM file_warnings WHERE repo=?", repo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	paths := map[string]bool{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths[path] = true
+	}
+	return paths, rows.Err()
+}
+
 func removeFile(tx *sql.Tx, repo, path string) error {
-	for _, table := range []string{"symbols", "relations", "file_cache_v2"} {
+	for _, table := range []string{"symbols", "relations", "file_cache_v2", "file_warnings"} {
 		column := "file"
-		if table == "file_cache_v2" {
+		if table == "file_cache_v2" || table == "file_warnings" {
 			column = "path"
 		}
 		if _, err := tx.Exec("DELETE FROM "+table+" WHERE repo=? AND "+column+"=?", repo, path); err != nil {

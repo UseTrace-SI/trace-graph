@@ -22,11 +22,15 @@ func refreshCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		count, err := graph.AnalyzeRepoContext(cmd.Context(), repoPath, db)
+		report, err := graph.AnalyzeRepoReport(cmd.Context(), repoPath, db)
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{"protocol": 1, "status": "ready", "symbols_updated": count})
+		out := map[string]any{"protocol": 1, "status": "ready", "symbols_updated": report.Symbols}
+		if len(report.Skipped) > 0 {
+			out["skipped_files"] = report.Skipped
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 	}}
 }
 

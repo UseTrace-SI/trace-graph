@@ -27,7 +27,7 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
   weighted over split words over signatures.
 - `trace-graph neighbors <symbol-or-id>` — show definitions and direct callers (calls and interface dispatch).
 - `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--limit 200] [--include-dispatch] [--json]` — transitive resolved-call report.
-- `trace-graph health` — index time, coverage, resolved/unresolved call counts, call resolution, relationship kinds and the Go type pass as JSON.
+- `trace-graph health` — index time, coverage, skipped files, resolved/unresolved call counts, call resolution, relationship kinds and the Go type pass as JSON.
 - `trace-graph snapshot [--limit 1000000]` — stream a versioned `trace.graph/v1` NDJSON snapshot.
 - `trace-graph changes --base snapshot.ndjson` — compare a complete snapshot with the current index.
 - `trace-graph compare --base REF [--head REF] [--detect-renames]` — compare two local Git commits without changing the checkout.
@@ -52,7 +52,9 @@ migrate it and answer from the last committed generation while a refresh runs.
 
 Default database paths are anchored to `--repo`. New initialized Trace projects use `.trace/graph/graph.db`; pre-existing `.trace-graph/graph.db` is retained, and `--db` remains explicit. With the binary on the CLI daemon's `PATH`, Graph refreshes after completed turns/sessions and CLI recovery. `trace context` and MCP `get_context` include repository-scoped symbols, relationships, and index time. Lookup never creates an index. Graph analyzes the current checkout; derived databases are rebuilt locally.
 
-Git checkouts index tracked and untracked non-ignored sources. Generated Trace state, dependency trees and secret paths are excluded even if tracked. Non-Git source directories remain supported. Newly ignored files are removed on the next successful generation.
+Git checkouts index tracked and untracked non-ignored sources. Generated Trace state, dependency trees and secret paths are excluded even if tracked. Non-Git source directories remain supported; without a `.gitignore` they also skip `dist/`, `build/`, `target/`, `.venv/` and `node_modules/` directories and `*.min.js` bundles. Newly ignored files are removed on the next successful generation.
+
+A source whose declarations cannot be given distinct identities (two same-named declarations on one line, typical of minified code) is skipped with a recorded warning instead of failing the whole index: `analyze` prints it to stderr, `refresh` lists it in `skipped_files`, and `health` reports `skipped_files` (count) and up to 20 `skipped` paths. The file is analyzed again once its content changes; its Go declarations stay out of the type pass meanwhile.
 
 Every Git command Graph runs (indexing, `cochange`, `compare`) drops ambient `GIT_*` variables, so a hook's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` or `GIT_CONFIG_*` cannot redirect it to another repository, index or configuration, and runs with `core.fsmonitor` disabled, lazy fetches prohibited, replacement objects ignored and optional locks off. Source reads are anchored to the repository root: a source beneath a directory that was replaced by a symlink is skipped (Git treats it as deleted), an open cannot leave the root, does not block on a FIFO and must yield the regular file that was checked.
 

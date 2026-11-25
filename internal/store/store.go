@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS relation_targets(relation_id TEXT PRIMARY KEY REFEREN
 CREATE INDEX IF NOT EXISTS relation_targets_from ON relation_targets(from_id);
 CREATE INDEX IF NOT EXISTS relation_targets_to ON relation_targets(to_id);
 CREATE TABLE IF NOT EXISTS repo_resolution(repo TEXT PRIMARY KEY,complete INTEGER NOT NULL,detail TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS file_warnings(repo TEXT NOT NULL,path TEXT NOT NULL,warning TEXT NOT NULL,PRIMARY KEY(repo,path));
 `
 	if _, err := tx.Exec(schema); err != nil {
 		return fmt.Errorf("migrating: %w", err)

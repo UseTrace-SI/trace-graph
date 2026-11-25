@@ -96,11 +96,14 @@ func analyzeCmd() *cobra.Command {
 			return err
 		}
 		defer db.Close()
-		n, err := graph.AnalyzeRepoContext(cmd.Context(), repoPath, db)
+		report, err := graph.AnalyzeRepoReport(cmd.Context(), repoPath, db)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "analyzed %d symbols\n", n)
+		fmt.Fprintf(cmd.OutOrStdout(), "analyzed %d symbols\n", report.Symbols)
+		for _, skipped := range report.Skipped {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: skipped %s: %s\n", skipped.Path, skipped.Warning)
+		}
 		return nil
 	}}
 }

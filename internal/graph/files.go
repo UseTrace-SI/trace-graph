@@ -30,6 +30,22 @@ func excludedSource(rel string) bool {
 	return false
 }
 
+// unversionedOutput reports build output, virtual environments and minified
+// bundles. A Git checkout leaves them to .gitignore (a tracked build/
+// directory can hold real sources), but a directory without Git has no
+// ignore file, so walking it would index generated code.
+func unversionedOutput(rel string, dir bool) bool {
+	base := strings.ToLower(filepath.Base(rel))
+	if dir {
+		switch base {
+		case "dist", "build", "target", ".venv", "node_modules":
+			return true
+		}
+		return false
+	}
+	return strings.HasSuffix(base, ".min.js")
+}
+
 // sourceVisitor receives a repository-relative path and the source opened
 // beneath the repository root. The walk closes the file after the visit.
 type sourceVisitor func(rel string, file *os.File) error
@@ -78,7 +94,7 @@ func walkSourcesContext(ctx context.Context, root string, visit sourceVisitor) e
 			if err != nil {
 				return err
 			}
-			if rel != "." && (excludedSource(rel) || ignored(rel)) {
+			if rel != "." && (excludedSource(rel) || unversionedOutput(rel, entry.IsDir()) || ignored(rel)) {
 				if entry.IsDir() {
 					return filepath.SkipDir
 				}

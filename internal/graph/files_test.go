@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/UseTrace-SI/trace-graph/internal/store"
@@ -84,5 +85,70 @@ func TestProjectExclusionsRemoveDerivedSymbols(t *testing.T) {
 	}
 	if err := db.QueryRow("SELECT count(*) FROM symbols WHERE name='Keep'").Scan(&n); err != nil || n != 1 {
 		t.Fatalf("unrelated code removed: %d %v", n, err)
+	}
+}
+
+// A directory without Git has no .gitignore, so build output, virtual
+// environments and minified bundles are excluded by name. A Git checkout
+// keeps indexing a tracked build/ directory.
+func TestNonGitDirectoryExcludesBuildOutput(t *testing.T) {
+	files := map[string]string{
+		"main.go":                     "package p\nfunc Keep(){}\n",
+		"src/app.js":                  "function app(){}\n",
+		"dist/bundle.js":              "function bundled(){}\n",
+		"build/gen.go":                "package p\nfunc Built(){}\n",
+		"target/gen.rs":               "fn built(){}\n",
+		".venv/lib/site.py":           "def venv():\n    pass\n",
+		"web/node_modules/m/index.js": "function dep(){}\n",
+		"web/vendor.min.js":           "function minified(){}\n",
+		"pkg/builder/b.go":            "package builder\nfunc Builder(){}\n",
+	}
+	write := func(root string) {
+		for rel, content := range files {
+			p := filepath.Join(root, rel)
+			if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	names := func(root string) []string {
+		db, err := store.Open(filepath.Join(t.TempDir(), "graph.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := AnalyzeRepo(root, db); err != nil {
+			t.Fatal(err)
+		}
+		rows, err := db.Query("SELECT name FROM symbols ORDER BY name")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, name)
+		}
+		return got
+	}
+	plain := t.TempDir()
+	write(plain)
+	if got := strings.Join(names(plain), ","); got != "Builder,Keep,app" {
+		t.Fatalf("non-Git directory indexed build output: %s", got)
+	}
+	checkout := t.TempDir()
+	write(checkout)
+	if out, err := exec.Command("git", "-C", checkout, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %s %v", out, err)
+	}
+	if got := strings.Join(names(checkout), ","); !strings.Contains(got, "Built") {
+		t.Fatalf("Git checkout lost an unignored build/ source: %s", got)
 	}
 }
