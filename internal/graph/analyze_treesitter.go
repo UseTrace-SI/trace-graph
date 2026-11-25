@@ -4,6 +4,7 @@ package graph
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	ts "github.com/tree-sitter/go-tree-sitter"
@@ -136,7 +137,7 @@ func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error
 				strings.Contains(kind, "trait") || strings.Contains(kind, "interface") || strings.Contains(kind, "type") {
 				symKind = "type"
 			}
-			id := rel + ":" + name + ":" + itoa(line)
+			id := rel + ":" + name + ":" + strconv.Itoa(line)
 			out.symbol(id, name, symKind, line, kind+" "+name)
 			out.content(id, src[node.StartByte():node.EndByte()], int(node.EndPosition().Row)+1)
 			n++
@@ -181,16 +182,4 @@ func analyzeFile(repo, rel, path string, src []byte, out *fileBatch) (int, error
 		writeLexRelations(lang, repo, rel, newLexSource(lang, string(src)), out, func(int) (string, string) { return "", "" }, nil)
 	}
 	return n, nil
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	b := []byte{}
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }

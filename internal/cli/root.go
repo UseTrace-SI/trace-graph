@@ -86,7 +86,9 @@ func Execute() error { return newRoot().Execute() }
 // Only commands that write a generation use it; lookups use readIndex so they
 // neither create an index nor wait behind an indexing transaction.
 func openDB() (*sql.DB, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+	// The index holds source-derived symbols and signatures: keep a new
+	// database directory private to its owner.
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
 		return nil, err
 	}
 	return store.Open(dbPath)

@@ -120,5 +120,5 @@ func goHandlerName(handler ast.Expr) string {
 }
 
 func goRouteRelationID(fromID string, line, column int) string {
-	return fromID + "->route:" + itoa(line) + ":" + itoa(column)
+	return fromID + "->route:" + strconv.Itoa(line) + ":" + strconv.Itoa(column)
 }

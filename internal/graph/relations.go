@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -33,11 +34,13 @@ func UnscopedID(id string) string {
 }
 
 // goSymbolID is the unscoped identity of a declaration at a physical line.
-func goSymbolID(rel, name string, line int) string { return rel + ":" + name + ":" + itoa(line) }
+func goSymbolID(rel, name string, line int) string {
+	return rel + ":" + name + ":" + strconv.Itoa(line)
+}
 
 // goRelationID is the unscoped identity of a call relation.
 func goRelationID(fromID, callee string, line, column int) string {
-	return fromID + "->" + callee + ":" + itoa(line) + ":" + itoa(column)
+	return fromID + "->" + callee + ":" + strconv.Itoa(line) + ":" + strconv.Itoa(column)
 }
 
 // Resolve unique package functions and explicitly declared local receiver

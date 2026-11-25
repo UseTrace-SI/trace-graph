@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -39,7 +40,7 @@ func Use(t T, fns map[string]func()) {
 		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "Use" {
 			for _, site := range goCallSites(fn.Body) {
 				at := fset.Position(site.call.Pos())
-				got = append(got, site.callee+"@"+itoa(at.Line))
+				got = append(got, site.callee+"@"+strconv.Itoa(at.Line))
 			}
 		}
 	}

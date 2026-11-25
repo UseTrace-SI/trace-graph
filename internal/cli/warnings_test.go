@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,5 +40,27 @@ func TestSkippedFilesAreReported(t *testing.T) {
 	}
 	if out := string(runContextCLI(t, root, path, "analyze")); !strings.Contains(out, "warning: skipped min.go: ") {
 		t.Fatalf("analyze did not warn: %s", out)
+	}
+}
+
+// The index holds source-derived symbols and signatures, so a database
+// directory created by Graph is private to its owner.
+func TestDefaultDatabaseDirectoryIsPrivate(t *testing.T) {
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package p\nfunc A(){}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newRoot()
+	cmd.SetOut(io.Discard)
+	cmd.SetArgs([]string{"--repo", root, "refresh"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, ".trace-graph"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0700 {
+		t.Fatalf("database directory mode %o, want 700", perm)
 	}
 }

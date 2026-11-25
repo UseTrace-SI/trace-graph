@@ -5,6 +5,7 @@ package graph
 import (
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -280,7 +281,7 @@ func lexDeclarations(lang string, s *lexSource) []*lexDecl {
 				lexBody(lang, s, d, start+m[3])
 			}
 			d.supers = lexHeritage(lang, text, m[3])
-			key := d.name + "\x00" + itoa(d.line)
+			key := d.name + "\x00" + strconv.Itoa(d.line)
 			if seen[key] {
 				break // one identity per name and line
 			}

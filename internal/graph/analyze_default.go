@@ -223,7 +223,7 @@ func analyzeRegexFile(repo, rel, src string, out *fileBatch) (int, error) {
 				} else if strings.Contains(visible, "class ") || strings.Contains(visible, "interface ") || strings.Contains(visible, "enum ") || strings.Contains(visible, "type ") || strings.Contains(visible, "struct ") || strings.Contains(visible, "trait ") || strings.Contains(visible, "object ") || strings.Contains(visible, "protocol ") || strings.Contains(visible, "module ") || strings.Contains(visible, "defmodule ") || strings.Contains(visible, "defn ") {
 					kind = "type"
 				}
-				id := rel + ":" + name + ":" + itoa(i+1)
+				id := rel + ":" + name + ":" + strconv.Itoa(i+1)
 				out.symbol(id, name, kind, i+1, visible)
 				out.content(id, []byte(visible), i+1)
 				n++
@@ -232,18 +232,6 @@ func analyzeRegexFile(repo, rel, src string, out *fileBatch) (int, error) {
 		}
 	}
 	return n, nil
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	b := []byte{}
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 func goSignature(fset *token.FileSet, d *ast.FuncDecl) string {

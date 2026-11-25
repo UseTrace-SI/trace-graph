@@ -3,6 +3,7 @@ package graph
 import (
 	pathpkg "path"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -856,7 +857,7 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, out *fileBatch, enc
 		if to == "" || imp.kind == "default" {
 			to = imp.specifier
 		}
-		id := rel + "#import:" + itoa(line) + ":" + itoa(column) + ":" + imp.kind + ":" + imp.local + ":" + imp.imported
+		id := rel + "#import:" + strconv.Itoa(line) + ":" + strconv.Itoa(column) + ":" + imp.kind + ":" + imp.local + ":" + imp.imported
 		out.relation(id, "", rel, to, "import", line, strings.Join([]string{"leximport", lang, imp.specifier, imp.imported, imp.local, imp.kind}, "\x1f"))
 	}
 	for _, route := range extractRoutes(lang, s) {
@@ -866,8 +867,8 @@ func writeLexRelations(lang, repo, rel string, s *lexSource, out *fileBatch, enc
 		if handler == "" {
 			handler = "(inline)"
 		}
-		id := rel + "#route:" + itoa(line) + ":" + itoa(column) + ":" + route.method
-		hint := strings.Join([]string{"lexroute", route.qualifier, route.handler, itoa(route.decorated)}, "\x1f")
+		id := rel + "#route:" + strconv.Itoa(line) + ":" + strconv.Itoa(column) + ":" + route.method
+		hint := strings.Join([]string{"lexroute", route.qualifier, route.handler, strconv.Itoa(route.decorated)}, "\x1f")
 		if bound := route.qualifier; local != nil && route.decorated == 0 && route.handler != "" {
 			if bound == "" {
 				bound = route.handler
