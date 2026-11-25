@@ -95,7 +95,7 @@ func TestParallelIndexIsDeterministic(t *testing.T) {
 	if dumps[0] == "" || dumps[0] != dumps[1] || dumps[0] != dumps[2] {
 		t.Fatal("generations differ with the number of workers")
 	}
-	if !strings.Contains(dumps[0], "min.go repository contains colliding") {
+	if !strings.Contains(dumps[0], "min.go colliding declaration identities") {
 		t.Fatal("collision warning missing from the parallel generation")
 	}
 }

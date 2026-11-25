@@ -27,8 +27,8 @@ func refreshCmd() *cobra.Command {
 			return err
 		}
 		out := map[string]any{"protocol": 1, "status": "ready", "symbols_updated": report.Symbols}
-		if len(report.Skipped) > 0 {
-			out["skipped_files"] = report.Skipped
+		if len(report.Warnings) > 0 {
+			out["file_warnings"] = report.Warnings
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 	}}

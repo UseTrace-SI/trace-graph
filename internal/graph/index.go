@@ -86,18 +86,19 @@ type Report struct {
 	// hashed because their stat key did not prove them unchanged, and
 	// Analyzed those whose content changed.
 	Files, Read, Analyzed int
-	// Skipped lists every source currently left out of the index.
-	Skipped []FileWarning
+	// Warnings lists the sources whose analysis was incomplete, such as
+	// files with colliding declaration identities.
+	Warnings []FileWarning
 }
 
-// maxReportedWarnings bounds the skipped files listed in a Report.
+// maxReportedWarnings bounds the file warnings listed in a Report.
 const maxReportedWarnings = 100
 
-// AnalyzeRepoReport is AnalyzeRepoContext with the files the generation
-// skipped. A source whose declarations cannot be given distinct identities
-// (two same-named declarations on one line, typical of minified code) is
-// skipped with a recorded warning rather than failing the whole index; it is
-// analyzed again once its content changes.
+// AnalyzeRepoReport is AnalyzeRepoContext with the file warnings of the
+// generation. Two same-named declarations on one line (typical of minified
+// or macro-heavy code) share an identity: the first is kept, the later ones
+// are dropped with a recorded warning instead of failing the whole index,
+// and the file is analyzed again once its content changes.
 func AnalyzeRepoReport(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 	report, err := analyzeRepo(ctx, repo, db)
 	if err != nil {
@@ -107,11 +108,11 @@ func AnalyzeRepoReport(ctx context.Context, repo string, db *sql.DB) (Report, er
 	if err != nil {
 		return Report{}, err
 	}
-	report.Skipped, err = FileWarnings(ctx, db, root, maxReportedWarnings)
+	report.Warnings, err = FileWarnings(ctx, db, root, maxReportedWarnings)
 	return report, err
 }
 
-// FileWarnings lists at most limit skipped sources of a repository in path
+// FileWarnings lists at most limit file warnings of a repository in path
 // order. An index without the warnings table has none.
 func FileWarnings(ctx context.Context, db interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
@@ -189,7 +190,7 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 	n, read, analyzed := 0, 0, 0
 	var totalBytes int64
 	// Every Go file, cached or not, takes part in package-wide type checking,
-	// except skipped files, whose declarations are not in the index. Sources
+	// except files with collision warnings, whose identities are ambiguous. Sources
 	// skipped by their stat key are read only if the pass runs.
 	var goSources []goSource
 	goBytes, goOverBudget := 0, false
@@ -206,7 +207,7 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 			}
 		}
 		if job.unchanged {
-			if !job.cached.skipped {
+			if !job.cached.warned {
 				addGoSource() // read later, only if the type pass runs
 			}
 			return nil
@@ -216,7 +217,7 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 		}
 		if job.identical {
 			// Touched but identical: remember the new stat key.
-			if !job.cached.skipped {
+			if !job.cached.warned {
 				addGoSource()
 			}
 			if job.cached.stat == job.key {
@@ -228,17 +229,18 @@ func analyzeRepo(ctx context.Context, repo string, db *sql.DB) (Report, error) {
 		if err := removeFile(tx, root, job.rel); err != nil {
 			return err
 		}
-		var collision *collisionError
-		if err := w.flush(root, job.batch); errors.As(err, &collision) {
-			// The batch wrote nothing; the file stays out of this generation
-			// until its content changes.
-			if _, err := tx.Exec("INSERT INTO file_warnings(repo,path,warning) VALUES(?,?,?)", root, job.rel, collision.Error()); err != nil {
+		if err := w.flush(root, job.batch); err != nil {
+			return err
+		}
+		n += job.count - len(job.batch.collisions)
+		if warning := job.batch.collisionWarning(); warning != "" {
+			// The type pass would map both declarations to the kept
+			// identity, so the file stays out of it (its package counts as
+			// incomplete) until its content changes.
+			if _, err := tx.Exec("INSERT INTO file_warnings(repo,path,warning) VALUES(?,?,?)", root, job.rel, warning); err != nil {
 				return err
 			}
-		} else if err != nil {
-			return err
 		} else {
-			n += job.count
 			addGoSource()
 		}
 		if _, err := tx.Exec("INSERT INTO file_cache_v2(repo,path,digest,stat) VALUES(?,?,?,?)", root, job.rel, job.digest, nullable(job.key)); err != nil {
@@ -480,8 +482,8 @@ func resolveRepository(ctx context.Context, tx *sql.Tx, root string, goSources [
 // cachedFile is the previous generation's record of a source.
 type cachedFile struct {
 	digest, stat string
-	// skipped files have a recorded warning and no declarations.
-	skipped bool
+	// warned files have a recorded warning and stay out of the type pass.
+	warned bool
 }
 
 func loadFileCache(ctx context.Context, tx *sql.Tx, repo string) (map[string]cachedFile, error) {
@@ -494,7 +496,7 @@ func loadFileCache(ctx context.Context, tx *sql.Tx, repo string) (map[string]cac
 	for rows.Next() {
 		var path string
 		var file cachedFile
-		if err := rows.Scan(&path, &file.digest, &file.stat, &file.skipped); err != nil {
+		if err := rows.Scan(&path, &file.digest, &file.stat, &file.warned); err != nil {
 			return nil, err
 		}
 		cache[path] = file

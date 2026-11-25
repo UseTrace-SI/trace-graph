@@ -280,20 +280,20 @@ func healthCmd() *cobra.Command {
 			return err
 		}
 		report := map[string]any{"protocol": 1, "repo": repoPath, "indexed_at": indexed, "files": files, "symbols": symbols, "calls": calls, "resolved_calls": resolved, "unresolved_calls": calls - resolved, "call_resolution": byResolution, "relations": byKind, "analysis": graph.Capabilities()}
-		// Sources left out of the index, such as files whose declarations
-		// cannot be given distinct identities.
-		skipped, err := graph.FileWarnings(ctx, db, repoPath, 20)
+		// Sources whose analysis was incomplete, such as files with
+		// colliding declaration identities.
+		warnings, err := graph.FileWarnings(ctx, db, repoPath, 20)
 		if err != nil {
 			return err
 		}
-		var skippedCount int
-		if len(skipped) > 0 {
-			if err := db.QueryRowContext(ctx, "SELECT count(*) FROM file_warnings WHERE repo=?", repoPath).Scan(&skippedCount); err != nil {
+		var warned int
+		if len(warnings) > 0 {
+			if err := db.QueryRowContext(ctx, "SELECT count(*) FROM file_warnings WHERE repo=?", repoPath).Scan(&warned); err != nil {
 				return err
 			}
 		}
-		report["skipped_files"] = skippedCount
-		report["skipped"] = skipped
+		report["files_with_warnings"] = warned
+		report["file_warnings"] = warnings
 		// Indexes written before package-wide type checking have no pass record.
 		var detail string
 		if err := db.QueryRowContext(ctx, "SELECT detail FROM repo_resolution WHERE repo=?", repoPath).Scan(&detail); err == nil {

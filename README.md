@@ -23,7 +23,7 @@ trace-graph def AnalyzeRepo              # definitions with signatures
 trace-graph neighbors AnalyzeRepo        # direct callers
 trace-graph impact AnalyzeRepo --depth 2 # transitive callers (--direction callees|both)
 trace-graph context --query "parse config" --semantic   # protocol-1 JSON for agents
-trace-graph health                       # coverage, resolution and skipped files
+trace-graph health                       # coverage, resolution and file warnings
 trace-graph mcp                          # the same lookups as read-only MCP tools
 ```
 
@@ -59,7 +59,7 @@ Registered in `newRoot` (`root.AddCommand`): `version`, `analyze`, `symbols`,
   weighted over split words over signatures.
 - `trace-graph neighbors <symbol-or-id>` — show definitions and direct callers (calls and interface dispatch).
 - `trace-graph impact <symbol-or-id> [--direction callers|callees|both] [--depth 3] [--limit 200] [--include-dispatch] [--json]` — transitive resolved-call report.
-- `trace-graph health` — index time, coverage, skipped files, resolved/unresolved call counts, call resolution, relationship kinds and the Go type pass as JSON.
+- `trace-graph health` — index time, coverage, file warnings, resolved/unresolved call counts, call resolution, relationship kinds and the Go type pass as JSON.
 - `trace-graph snapshot [--limit 1000000]` — stream a versioned `trace.graph/v1` NDJSON snapshot.
 - `trace-graph changes --base snapshot.ndjson` — compare a complete snapshot with the current index.
 - `trace-graph compare --base REF [--head REF] [--detect-renames]` — compare two local Git commits without changing the checkout.
@@ -124,7 +124,7 @@ Default database paths are anchored to `--repo`. New initialized Trace projects 
 
 Git checkouts index tracked and untracked non-ignored sources. Generated Trace state, dependency trees and secret paths are excluded even if tracked. Non-Git source directories remain supported; without a `.gitignore` they also skip `.venv/` directories and `*.min.js` bundles anywhere, and `dist/`, `build/` and `target/` directories at the walked root or beside a build manifest (`package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `pom.xml`, `build.gradle[.kts]`); deeper directories with those names, such as `go/build` or `cmd/dist`, are indexed. `node_modules/` is excluded everywhere, as before. Newly ignored files are removed on the next successful generation.
 
-A source whose declarations cannot be given distinct identities (two same-named declarations on one line, typical of minified code) is skipped with a recorded warning instead of failing the whole index: `analyze` prints it to stderr, `refresh` lists it in `skipped_files`, and `health` reports `skipped_files` (count) and up to 20 `skipped` paths. The file is analyzed again once its content changes; its Go declarations stay out of the type pass meanwhile.
+Two same-named declarations on one line (typical of minified or macro-heavy code) share a file/name/line identity. Instead of failing the whole index, the first is kept and later ones are dropped together with their content, receivers and relationships, and the file gets a recorded warning: `analyze` prints it to stderr, `refresh` lists it in `file_warnings`, and `health` reports `files_with_warnings` and up to 20 `file_warnings`. The file's Go code stays out of the type pass (its package counts as incomplete) until its content changes. Revision comparisons still refuse such files.
 
 Every Git command Graph runs (indexing, `cochange`, `compare`) drops ambient `GIT_*` variables, so a hook's `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` or `GIT_CONFIG_*` cannot redirect it to another repository, index or configuration, and runs with `core.fsmonitor` disabled, lazy fetches prohibited, replacement objects ignored and optional locks off. Source reads are anchored to the repository root: a source beneath a directory that was replaced by a symlink is skipped (Git treats it as deleted), an open cannot leave the root, does not block on a FIFO and must yield the regular file that was checked.
 

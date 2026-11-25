@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestSkippedFilesAreReported(t *testing.T) {
+func TestFileWarningsAreReported(t *testing.T) {
 	root, _ := filepath.EvalSymlinks(t.TempDir())
 	path := filepath.Join(t.TempDir(), "graph.db")
 	if err := os.WriteFile(filepath.Join(root, "ok.go"), []byte("package p\nfunc Fine(){}\n"), 0600); err != nil {
@@ -19,26 +19,26 @@ func TestSkippedFilesAreReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	var refresh struct {
-		Status  string `json:"status"`
-		Skipped []struct {
+		Status   string `json:"status"`
+		Warnings []struct {
 			Path    string `json:"path"`
 			Warning string `json:"warning"`
-		} `json:"skipped_files"`
+		} `json:"file_warnings"`
 	}
-	if err := json.Unmarshal(runContextCLI(t, root, path, "refresh"), &refresh); err != nil || refresh.Status != "ready" || len(refresh.Skipped) != 1 || refresh.Skipped[0].Path != "min.go" {
-		t.Fatalf("refresh did not report the skipped file: %+v %v", refresh, err)
+	if err := json.Unmarshal(runContextCLI(t, root, path, "refresh"), &refresh); err != nil || refresh.Status != "ready" || len(refresh.Warnings) != 1 || refresh.Warnings[0].Path != "min.go" {
+		t.Fatalf("refresh did not report the file warning: %+v %v", refresh, err)
 	}
 	var health struct {
-		SkippedFiles int `json:"skipped_files"`
-		Skipped      []struct {
+		Warned   int `json:"files_with_warnings"`
+		Warnings []struct {
 			Path string `json:"path"`
-		} `json:"skipped"`
+		} `json:"file_warnings"`
 		Symbols int `json:"symbols"`
 	}
-	if err := json.Unmarshal(runContextCLI(t, root, path, "health"), &health); err != nil || health.SkippedFiles != 1 || len(health.Skipped) != 1 || health.Skipped[0].Path != "min.go" || health.Symbols != 1 {
-		t.Fatalf("health did not report the skipped file: %+v %v", health, err)
+	if err := json.Unmarshal(runContextCLI(t, root, path, "health"), &health); err != nil || health.Warned != 1 || len(health.Warnings) != 1 || health.Warnings[0].Path != "min.go" || health.Symbols != 4 {
+		t.Fatalf("health did not report the file warning: %+v %v", health, err)
 	}
-	if out := string(runContextCLI(t, root, path, "analyze")); !strings.Contains(out, "warning: skipped min.go: ") {
+	if out := string(runContextCLI(t, root, path, "analyze")); !strings.Contains(out, "warning: min.go: colliding declaration identities") {
 		t.Fatalf("analyze did not warn: %s", out)
 	}
 }

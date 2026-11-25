@@ -115,8 +115,8 @@ func analyzeCmd() *cobra.Command {
 			return err
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "analyzed %d symbols\n", report.Symbols)
-		for _, skipped := range report.Skipped {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: skipped %s: %s\n", skipped.Path, skipped.Warning)
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s: %s\n", warning.Path, warning.Warning)
 		}
 		return nil
 	}}

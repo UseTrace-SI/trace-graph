@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/UseTrace-SI/trace-graph/internal/ident"
 )
@@ -45,6 +46,13 @@ type fileBatch struct {
 	moduleOverride *string
 	rows           []observation
 	ids            map[string]bool
+	// strict batches fail on colliding identities (revision comparisons);
+	// others drop the later declaration, see symbol.
+	strict bool
+	// collisions lists dropped duplicate identities in recording order;
+	// dropping is the identity whose observations are currently ignored.
+	collisions []string
+	dropping   string
 	// shapes collects rename evidence during revision analysis only.
 	shapes map[string]symbolShape
 	err    error
@@ -60,6 +68,20 @@ func (e *collisionError) Error() string {
 	return fmt.Sprintf("repository contains colliding declaration identities (%s); separate same-name declarations onto different lines", e.id)
 }
 
+// collisionWarning describes the declarations a batch dropped.
+func (b *fileBatch) collisionWarning() string {
+	if len(b.collisions) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("colliding declaration identities (%s): kept the first declaration of each and dropped %d later one(s) with their content, receivers and relationships; separate same-name declarations onto different lines", strings.Join(b.collisions, ", "), len(b.collisions))
+}
+
+// symbol records a declaration. A second declaration with the same identity
+// (same file, name and line) cannot be stored without replacing the first,
+// so in a non-strict batch it is dropped together with the observations
+// recorded for it until the next declaration: every parser records a
+// declaration's content, receiver and calls right after the declaration
+// itself. Declaration-aware lexical analysis never yields duplicates.
 func (b *fileBatch) symbol(id, name, kind string, line int, signature string) {
 	if b.err != nil {
 		return
@@ -68,15 +90,26 @@ func (b *fileBatch) symbol(id, name, kind string, line int, signature string) {
 		b.ids = map[string]bool{}
 	}
 	if b.ids[id] {
-		b.err = &collisionError{id: id}
+		if b.strict {
+			b.err = &collisionError{id: id}
+			return
+		}
+		b.collisions = append(b.collisions, id)
+		b.dropping = id
 		return
 	}
+	b.dropping = ""
 	b.ids[id] = true
 	b.rows = append(b.rows, observation{kind: observeSymbol, id: id, namespace: b.namespace, name: name, symbolKind: kind, line: line, signature: signature})
 }
 
+// ignored reports observations of a dropped duplicate declaration.
+func (b *fileBatch) ignored(id string) bool {
+	return b.err != nil || (b.dropping != "" && id == b.dropping)
+}
+
 func (b *fileBatch) content(id string, src []byte, endLine int) {
-	if b.err != nil {
+	if b.ignored(id) {
 		return
 	}
 	b.rows = append(b.rows, observation{kind: observeContent, id: id, hash: fmt.Sprintf("%x", sha256.Sum256(src)), endLine: endLine})
@@ -88,7 +121,7 @@ func (b *fileBatch) content(id string, src []byte, endLine int) {
 }
 
 func (b *fileBatch) receiverOf(id, receiver string) {
-	if b.err != nil {
+	if b.ignored(id) {
 		return
 	}
 	b.rows = append(b.rows, observation{kind: observeReceiver, id: id, receiver: receiver})
@@ -102,7 +135,7 @@ func (b *fileBatch) call(fromID, fromName, toName string, line, column int, hint
 // relation records a relationship. fromID is empty for module-level
 // relationships such as imports.
 func (b *fileBatch) relation(id, fromID, fromName, toName, kind string, line int, hint string) {
-	if b.err != nil {
+	if b.err != nil || (fromID != "" && b.ignored(fromID)) {
 		return
 	}
 	b.rows = append(b.rows, observation{kind: observeRelation, id: id, namespace: b.namespace, line: line, fromID: fromID, fromName: fromName, toName: toName, relationKind: kind, hint: hint})
@@ -126,6 +159,8 @@ type indexWriter struct {
 func (w *indexWriter) batch(rel string) *fileBatch {
 	b := &fileBatch{rel: rel, moduleOverride: w.moduleOverride}
 	if w.shapes != nil {
+		// Revision comparisons refuse ambiguous identities.
+		b.strict = true
 		b.shapes = map[string]symbolShape{}
 	}
 	return b
